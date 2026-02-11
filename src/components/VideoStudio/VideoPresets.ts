@@ -1,0 +1,220 @@
+// --- VIDEO STUDIO PRESETS --- //
+
+export type VideoAspectRatio = '16:9' | '9:16' | '1:1';
+export type CreativeMode = 'product' | 'creative';
+
+export interface PlatformPreset {
+    id: string;
+    label: string;
+    platform: string;
+    icon: string; // Emoji
+    aspectRatio: VideoAspectRatio;
+    width: number;
+    height: number;
+    minDuration: number;
+    maxDuration: number;
+    defaultDuration: number;
+    category: CreativeMode;
+}
+
+export interface VideoStylePreset {
+    id: string;
+    label: string;
+    description: string;
+    promptModifier: string;
+}
+
+// --- PLATFORM PRESETS --- //
+
+export const PRODUCT_VIDEO_PRESETS: PlatformPreset[] = [
+    {
+        id: 'shop-banner',
+        label: 'Shop Banner',
+        platform: 'E-Commerce',
+        icon: '🛒',
+        aspectRatio: '16:9',
+        width: 1920, height: 1080,
+        minDuration: 5, maxDuration: 8, defaultDuration: 5,
+        category: 'product',
+    },
+    {
+        id: 'product-page',
+        label: 'Produktseite',
+        platform: 'E-Commerce',
+        icon: '📦',
+        aspectRatio: '1:1',
+        width: 1080, height: 1080,
+        minDuration: 5, maxDuration: 8, defaultDuration: 5,
+        category: 'product',
+    },
+    {
+        id: 'youtube-short',
+        label: 'YouTube Short',
+        platform: 'YouTube',
+        icon: '▶️',
+        aspectRatio: '9:16',
+        width: 1080, height: 1920,
+        minDuration: 5, maxDuration: 15, defaultDuration: 8,
+        category: 'product',
+    },
+];
+
+export const CREATIVE_PRESETS: PlatformPreset[] = [
+    {
+        id: 'instagram-reel',
+        label: 'Instagram Reel',
+        platform: 'Instagram',
+        icon: '📸',
+        aspectRatio: '9:16',
+        width: 1080, height: 1920,
+        minDuration: 5, maxDuration: 15, defaultDuration: 8,
+        category: 'creative',
+    },
+    {
+        id: 'instagram-story',
+        label: 'Instagram Story',
+        platform: 'Instagram',
+        icon: '📱',
+        aspectRatio: '9:16',
+        width: 1080, height: 1920,
+        minDuration: 5, maxDuration: 15, defaultDuration: 10,
+        category: 'creative',
+    },
+    {
+        id: 'tiktok',
+        label: 'TikTok',
+        platform: 'TikTok',
+        icon: '🎵',
+        aspectRatio: '9:16',
+        width: 1080, height: 1920,
+        minDuration: 5, maxDuration: 15, defaultDuration: 8,
+        category: 'creative',
+    },
+    {
+        id: 'pinterest-pin',
+        label: 'Pinterest Pin',
+        platform: 'Pinterest',
+        icon: '📌',
+        aspectRatio: '9:16',
+        width: 1000, height: 1500,
+        minDuration: 5, maxDuration: 10, defaultDuration: 6,
+        category: 'creative',
+    },
+    {
+        id: 'facebook-ad',
+        label: 'Facebook Ad',
+        platform: 'Facebook',
+        icon: '👍',
+        aspectRatio: '1:1',
+        width: 1080, height: 1080,
+        minDuration: 5, maxDuration: 10, defaultDuration: 6,
+        category: 'creative',
+    },
+];
+
+export const ALL_PRESETS = [...PRODUCT_VIDEO_PRESETS, ...CREATIVE_PRESETS];
+
+// --- VIDEO STYLE PRESETS --- //
+
+export const VIDEO_STYLES: VideoStylePreset[] = [
+    {
+        id: 'cinematic',
+        label: 'Cinematic',
+        description: 'Smooth camera drift, warm tones, premium feel',
+        promptModifier: 'Cinematic slow camera movement. Warm golden-hour lighting. Shallow depth of field. Premium, high-end product photography aesthetic. Smooth dolly shot.',
+    },
+    {
+        id: 'energetic',
+        label: 'Energetic',
+        description: 'Dynamic cuts, vibrant colors, trending feel',
+        promptModifier: 'Dynamic, energetic camera movements. Vibrant saturated colors. Quick subtle zooms. Modern trending social media aesthetic. Eye-catching and lively.',
+    },
+    {
+        id: 'minimal',
+        label: 'Minimal',
+        description: 'Clean, slow, elegant product focus',
+        promptModifier: 'Ultra-clean minimalist aesthetic. Soft diffused lighting. Very slow, deliberate camera movement. White or neutral background. Focus entirely on the product.',
+    },
+    {
+        id: 'cozy',
+        label: 'Cozy / Lifestyle',
+        description: 'Warm home setting, handmade feel',
+        promptModifier: 'Cozy, warm home environment. Soft natural window light. Wooden desk or living room setting. Candles, plants, coffee cup nearby. Handmade crafting atmosphere.',
+    },
+];
+
+// --- PROMPT BUILDERS --- //
+
+export function buildProductVideoPrompt(
+    style: VideoStylePreset,
+    sceneDescription: string,
+    productNames: string[],
+    isFramed: boolean
+): string {
+    const productList = productNames.length > 0
+        ? productNames.map(n => `"${n}"`).join(', ')
+        : 'a paint-by-numbers canvas kit';
+
+    return `
+PRODUCT VIDEO — Professional Paint-by-Numbers Showcase.
+
+PRODUCT: ${isFramed
+            ? 'A finished paint-by-numbers canvas, professionally stretched over a wooden frame, displayed as premium wall art.'
+            : 'An unframed paint-by-numbers canvas template lying open, showing numbered zones and thin outlines. A painting kit in progress.'}
+
+PRODUCTS SHOWN: ${productList}
+
+SCENE: ${sceneDescription || 'A premium lifestyle setting that highlights the product.'}
+
+STYLE: ${style.promptModifier}
+
+REQUIREMENTS:
+- The product must be the clear focal point of the video.
+- Lighting must feel natural and consistent throughout the scene.
+- Camera movement should be smooth and professional.
+- The video should feel like a high-end e-commerce product showcase.
+`.trim();
+}
+
+export function buildCreativePrompt(
+    style: VideoStylePreset,
+    platform: PlatformPreset,
+    sceneDescription: string,
+    productNames: string[],
+    isFramed: boolean
+): string {
+    const productList = productNames.length > 0
+        ? productNames.map(n => `"${n}"`).join(', ')
+        : 'a paint-by-numbers canvas kit';
+
+    return `
+SOCIAL MEDIA CREATIVE — ${platform.label} (${platform.platform})
+
+PRODUCT: ${isFramed
+            ? 'A finished paint-by-numbers canvas, professionally framed.'
+            : 'An unframed paint-by-numbers canvas template with numbered zones.'}
+
+PRODUCTS SHOWN: ${productList}
+
+SCENE: ${sceneDescription || 'An eye-catching setting optimized for social media engagement.'}
+
+STYLE: ${style.promptModifier}
+
+PLATFORM-SPECIFIC:
+- Optimized for ${platform.platform} ${platform.label} format (${platform.aspectRatio}).
+- Content should be visually striking and stop-scrolling.
+- Leave space at top and bottom for platform UI overlays (safe zones).
+- The reveal of the product should feel satisfying and shareable.
+
+REQUIREMENTS:
+- Camera movement should be dynamic yet smooth.
+- Colors should be vibrant and pop on mobile screens.
+- The product must be clearly visible and the star of the content.
+`.trim();
+}
+
+// Cost estimation
+export function estimateCost(durationSeconds: number): string {
+    const cost = durationSeconds * 0.75;
+    return `~$${cost.toFixed(2)}`;
+}
