@@ -125,31 +125,29 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                 throw new Error("Veo hat kein gültiges Video zurückgegeben.");
             }
 
-            // Download as blob for browser preview
+            // Download as blob for browser preview (browser-compliant)
             const videoFile = generatedVideo.video;
-            const downloadResponse = await (ai.files as any).download({ file: videoFile });
+            const videoUri = videoFile.uri || videoFile.url;
 
-            // Create blob URL for preview
-            let blob: Blob;
-            if (downloadResponse instanceof Blob) {
-                blob = downloadResponse;
-            } else if (downloadResponse?.arrayBuffer) {
-                const buffer = await downloadResponse.arrayBuffer();
-                blob = new Blob([buffer], { type: 'video/mp4' });
-            } else {
-                // Fallback: try to get video URI directly
-                const videoUri = videoFile.uri || videoFile.url;
-                if (videoUri) {
-                    const resp = await fetch(videoUri);
-                    blob = await resp.blob();
-                } else {
-                    throw new Error("Konnte das Video nicht herunterladen.");
-                }
+            if (!videoUri) {
+                throw new Error("Keine Video-URL von Veo erhalten.");
             }
 
+            const downloadResp = await fetch(videoUri, {
+                headers: {
+                    'x-goog-api-key': process.env.API_KEY || '',
+                }
+            });
+
+            if (!downloadResp.ok) {
+                throw new Error(`Download fehlgeschlagen: ${downloadResp.statusText}`);
+            }
+
+            const blob = await downloadResp.blob();
             const url = URL.createObjectURL(blob);
             setVideoUrl(url);
             setGenerationProgress(null);
+
 
         } catch (err: any) {
             console.error("Video generation failed:", err);
