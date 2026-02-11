@@ -54,7 +54,7 @@ export const PRODUCT_VIDEO_PRESETS: PlatformPreset[] = [
         icon: '▶️',
         aspectRatio: '9:16',
         width: 1080, height: 1920,
-        minDuration: 5, maxDuration: 15, defaultDuration: 8,
+        minDuration: 5, maxDuration: 8, defaultDuration: 6, // Reduced from 15s to 8s
         category: 'product',
     },
 ];
@@ -67,7 +67,7 @@ export const CREATIVE_PRESETS: PlatformPreset[] = [
         icon: '📸',
         aspectRatio: '9:16',
         width: 1080, height: 1920,
-        minDuration: 5, maxDuration: 15, defaultDuration: 8,
+        minDuration: 5, maxDuration: 8, defaultDuration: 6, // Reduced from 15s to 8s
         category: 'creative',
     },
     {
@@ -77,7 +77,7 @@ export const CREATIVE_PRESETS: PlatformPreset[] = [
         icon: '📱',
         aspectRatio: '9:16',
         width: 1080, height: 1920,
-        minDuration: 5, maxDuration: 15, defaultDuration: 10,
+        minDuration: 5, maxDuration: 8, defaultDuration: 7, // Reduced from 15s to 8s
         category: 'creative',
     },
     {
@@ -87,7 +87,7 @@ export const CREATIVE_PRESETS: PlatformPreset[] = [
         icon: '🎵',
         aspectRatio: '9:16',
         width: 1080, height: 1920,
-        minDuration: 5, maxDuration: 15, defaultDuration: 8,
+        minDuration: 5, maxDuration: 8, defaultDuration: 6, // Reduced from 15s to 8s
         category: 'creative',
     },
     {
@@ -97,7 +97,7 @@ export const CREATIVE_PRESETS: PlatformPreset[] = [
         icon: '📌',
         aspectRatio: '9:16',
         width: 1000, height: 1500,
-        minDuration: 5, maxDuration: 10, defaultDuration: 6,
+        minDuration: 5, maxDuration: 8, defaultDuration: 6, // Reduced from 10s to 8s
         category: 'creative',
     },
     {
@@ -107,10 +107,11 @@ export const CREATIVE_PRESETS: PlatformPreset[] = [
         icon: '👍',
         aspectRatio: '9:16', // Updated from 1:1
         width: 1080, height: 1920,
-        minDuration: 5, maxDuration: 10, defaultDuration: 6,
+        minDuration: 5, maxDuration: 8, defaultDuration: 6, // Reduced from 10s to 8s
         category: 'creative',
     },
 ];
+
 
 
 export const ALL_PRESETS = [...PRODUCT_VIDEO_PRESETS, ...CREATIVE_PRESETS];
