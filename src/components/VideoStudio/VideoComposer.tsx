@@ -108,9 +108,11 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                                 data: base64,
                                 mimeType: 'image/png',
                             }
-                        }
+                        },
+                        type: 'SUBJECT' // REQUIRED for Veo 3.1 to know how to use the image
                     };
                 };
+
 
                 const extractBase64 = (dataUrl: string | null | undefined) => {
                     if (!dataUrl || typeof dataUrl !== 'string') return null;
@@ -189,22 +191,32 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             setGenerationProgress("Video wird heruntergeladen...");
 
             // Get the generated video
-            console.log("Veo Operation Finished:", operation);
+            console.log("Veo Operation Detailed Result:", JSON.stringify(operation, null, 2));
 
             if (operation.error) {
                 console.error("Veo Operation Error:", operation.error);
-                throw new Error(`Veo Fehler: ${operation.error.message || JSON.stringify(operation.error)}`);
+                throw new Error(`Veo API Fehler: ${operation.error.message || JSON.stringify(operation.error)}`);
             }
 
-            const generatedVideo = operation.response?.generatedVideos?.[0];
-            if (!generatedVideo?.video) {
+            if (!operation.response) {
+                throw new Error("Veo hat keine Antwort (Response) gesendet. Bitte erneut versuchen.");
+            }
+
+            const generatedVideos = operation.response?.generatedVideos;
+            if (!generatedVideos || generatedVideos.length === 0) {
                 // Check if there was a safety filter
                 if (operation.response?.videoFilters) {
-                    console.warn("Veo Safety Filters:", operation.response.videoFilters);
+                    console.warn("Veo Safety Filters triggered:", operation.response.videoFilters);
                     throw new Error("Video wurde durch Sicherheitsfilter abgelehnt. Bitte ändere deinen Prompt.");
                 }
-                throw new Error("Veo hat kein gültiges Video zurückgegeben (möglicherweise internes Problem).");
+                throw new Error("Veo hat keine Videos in der Antwort generiert (möglicherweise ein Modell-Fehler).");
             }
+
+            const generatedVideo = generatedVideos[0];
+            if (!generatedVideo?.video) {
+                throw new Error("Veo Antwort enthält kein gültiges Video-Objekt.");
+            }
+
 
 
             // Download as blob for browser preview (browser-compliant)
