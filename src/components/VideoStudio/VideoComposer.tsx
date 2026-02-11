@@ -100,10 +100,17 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             if (useReference) {
                 const referenceImages: any[] = [];
 
+                const extractBase64 = (dataUrl: string | null | undefined) => {
+                    if (!dataUrl || typeof dataUrl !== 'string') return null;
+                    const parts = dataUrl.split(',');
+                    return parts.length > 1 ? parts[1] : null;
+                };
+
                 // 1. Primary Motif (The scene artwork)
-                if (sourceImage) {
+                const motifBase64 = extractBase64(sourceImage);
+                if (motifBase64) {
                     referenceImages.push({
-                        imageBytes: sourceImage.split(',')[1],
+                        imageBytes: motifBase64,
                         mimeType: 'image/png',
                     });
                 }
@@ -114,9 +121,10 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                     p.name.toLowerCase().includes('topf') ||
                     p.name.toLowerCase().includes('pot')
                 );
-                if (paintPots && referenceImages.length < 3) {
+                const paintPotsBase64 = paintPots ? extractBase64(paintPots.image) : null;
+                if (paintPotsBase64 && referenceImages.length < 3) {
                     referenceImages.push({
-                        imageBytes: paintPots.image.split(',')[1],
+                        imageBytes: paintPotsBase64,
                         mimeType: 'image/png',
                     });
                     console.log("Veo: Added Paint Pots as ingredient.");
@@ -128,9 +136,10 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                     p.name.toLowerCase().includes('malvorlage') ||
                     p.name.toLowerCase().includes('template')
                 );
-                if (template && referenceImages.length < 3) {
+                const templateBase64 = template ? extractBase64(template.image) : null;
+                if (templateBase64 && referenceImages.length < 3) {
                     referenceImages.push({
-                        imageBytes: template.image.split(',')[1],
+                        imageBytes: templateBase64,
                         mimeType: 'image/png',
                     });
                     console.log("Veo: Added Template as ingredient.");
@@ -142,14 +151,16 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                         p.name.toLowerCase().includes('pinsel') ||
                         p.name.toLowerCase().includes('brush')
                     );
-                    if (brushes) {
+                    const brushesBase64 = brushes ? extractBase64(brushes.image) : null;
+                    if (brushesBase64) {
                         referenceImages.push({
-                            imageBytes: brushes.image.split(',')[1],
+                            imageBytes: brushesBase64,
                             mimeType: 'image/png',
                         });
                         console.log("Veo: Added Brushes as ingredient.");
                     }
                 }
+
 
                 if (referenceImages.length > 0) {
                     // Note: According to current API research, multiple images are passed in the config
