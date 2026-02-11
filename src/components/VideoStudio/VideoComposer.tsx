@@ -100,6 +100,18 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             if (useReference) {
                 const referenceImages: any[] = [];
 
+                const createRefImage = (base64: string | null) => {
+                    if (!base64) return null;
+                    return {
+                        image: {
+                            inlineData: {
+                                data: base64,
+                                mimeType: 'image/png',
+                            }
+                        }
+                    };
+                };
+
                 const extractBase64 = (dataUrl: string | null | undefined) => {
                     if (!dataUrl || typeof dataUrl !== 'string') return null;
                     const parts = dataUrl.split(',');
@@ -108,11 +120,9 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
 
                 // 1. Primary Motif (The scene artwork)
                 const motifBase64 = extractBase64(sourceImage);
-                if (motifBase64) {
-                    referenceImages.push({
-                        imageBytes: motifBase64,
-                        mimeType: 'image/png',
-                    });
+                const motifRef = createRefImage(motifBase64);
+                if (motifRef) {
+                    referenceImages.push(motifRef);
                 }
 
                 // 2. Props: Paint Pots
@@ -121,12 +131,9 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                     p.name.toLowerCase().includes('topf') ||
                     p.name.toLowerCase().includes('pot')
                 );
-                const paintPotsBase64 = paintPots ? extractBase64(paintPots.image) : null;
-                if (paintPotsBase64 && referenceImages.length < 3) {
-                    referenceImages.push({
-                        imageBytes: paintPotsBase64,
-                        mimeType: 'image/png',
-                    });
+                const paintPotsRef = paintPots ? createRefImage(extractBase64(paintPots.image)) : null;
+                if (paintPotsRef && referenceImages.length < 3) {
+                    referenceImages.push(paintPotsRef);
                     console.log("Veo: Added Paint Pots as ingredient.");
                 }
 
@@ -136,12 +143,9 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                     p.name.toLowerCase().includes('malvorlage') ||
                     p.name.toLowerCase().includes('template')
                 );
-                const templateBase64 = template ? extractBase64(template.image) : null;
-                if (templateBase64 && referenceImages.length < 3) {
-                    referenceImages.push({
-                        imageBytes: templateBase64,
-                        mimeType: 'image/png',
-                    });
+                const templateRef = template ? createRefImage(extractBase64(template.image)) : null;
+                if (templateRef && referenceImages.length < 3) {
+                    referenceImages.push(templateRef);
                     console.log("Veo: Added Template as ingredient.");
                 }
 
@@ -151,25 +155,21 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                         p.name.toLowerCase().includes('pinsel') ||
                         p.name.toLowerCase().includes('brush')
                     );
-                    const brushesBase64 = brushes ? extractBase64(brushes.image) : null;
-                    if (brushesBase64) {
-                        referenceImages.push({
-                            imageBytes: brushesBase64,
-                            mimeType: 'image/png',
-                        });
+                    const brushesRef = brushes ? createRefImage(extractBase64(brushes.image)) : null;
+                    if (brushesRef) {
+                        referenceImages.push(brushesRef);
                         console.log("Veo: Added Brushes as ingredient.");
                     }
                 }
 
-
                 if (referenceImages.length > 0) {
-                    // Note: According to current API research, multiple images are passed in the config
                     videoRequest.config.referenceImages = referenceImages;
-                    console.log(`Veo: Sending ${referenceImages.length} reference ingredients.`);
+                    console.log(`Veo: Sending ${referenceImages.length} reference ingredients with inlineData.`);
                 }
             } else {
                 console.log("Veo: Using text-only generation (better for audio/consistency).");
             }
+
 
 
             // Start the async video generation
@@ -189,10 +189,23 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             setGenerationProgress("Video wird heruntergeladen...");
 
             // Get the generated video
+            console.log("Veo Operation Finished:", operation);
+
+            if (operation.error) {
+                console.error("Veo Operation Error:", operation.error);
+                throw new Error(`Veo Fehler: ${operation.error.message || JSON.stringify(operation.error)}`);
+            }
+
             const generatedVideo = operation.response?.generatedVideos?.[0];
             if (!generatedVideo?.video) {
-                throw new Error("Veo hat kein gültiges Video zurückgegeben.");
+                // Check if there was a safety filter
+                if (operation.response?.videoFilters) {
+                    console.warn("Veo Safety Filters:", operation.response.videoFilters);
+                    throw new Error("Video wurde durch Sicherheitsfilter abgelehnt. Bitte ändere deinen Prompt.");
+                }
+                throw new Error("Veo hat kein gültiges Video zurückgegeben (möglicherweise internes Problem).");
             }
+
 
             // Download as blob for browser preview (browser-compliant)
             const videoFile = generatedVideo.video;
