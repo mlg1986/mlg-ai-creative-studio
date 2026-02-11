@@ -176,13 +176,20 @@ STYLE: ${style.promptModifier}
 
 AUDIO: ${audioInstructions}
 
+INGREDIENTS:
+- Use the provided reference images as visual anchors.
+- Reference 1: The primary artistic motif (scene focus).
+- Reference 2 & 3: High-fidelity props (Paint Pots, Brushes, or Template) that must appear physically in the scene.
+
 REQUIREMENTS:
 - The product must be the clear focal point of the video.
 - Lighting must feel natural and consistent throughout the scene.
 - Camera movement should be smooth and professional.
 - The video should feel like a high-end e-commerce product showcase.
+- Ensure the provided props (Paint Pots/Brushes) are visible on the desk/surface.
 `.trim();
 }
+
 
 export function buildCreativePrompt(
     style: VideoStylePreset,
@@ -216,6 +223,11 @@ STYLE: ${style.promptModifier}
 
 AUDIO: ${audioInstructions}
 
+INGREDIENTS:
+- Use the provided reference images as visual anchors.
+- Reference 1: The primary artistic motif.
+- Reference 2 & 3: High-fidelity props (Paint Pots, Brushes, or Template) to be used as props in the social media scene.
+
 PLATFORM-SPECIFIC:
 - Optimized for ${platform.platform} ${platform.label} format (${platform.aspectRatio}).
 - Content should be visually striking and stop-scrolling.
@@ -228,6 +240,7 @@ REQUIREMENTS:
 - The product must be clearly visible and the star of the content.
 `.trim();
 }
+
 
 
 // Cost estimation

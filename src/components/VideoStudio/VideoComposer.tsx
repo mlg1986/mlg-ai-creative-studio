@@ -96,16 +96,70 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                 },
             };
 
-            // Add source image if available (image-to-video)
-            if (sourceImage && useReference) {
-                videoRequest.image = {
-                    imageBytes: sourceImage.split(',')[1],
-                    mimeType: 'image/png',
-                };
-                console.log("Veo: Using reference image for generation.");
+            // MULTI-REFERENCE: "Ingredients to Video" (Max 3)
+            if (useReference) {
+                const referenceImages: any[] = [];
+
+                // 1. Primary Motif (The scene artwork)
+                if (sourceImage) {
+                    referenceImages.push({
+                        imageBytes: sourceImage.split(',')[1],
+                        mimeType: 'image/png',
+                    });
+                }
+
+                // 2. Props: Paint Pots
+                const paintPots = products.find(p =>
+                    p.name.toLowerCase().includes('farbe') ||
+                    p.name.toLowerCase().includes('topf') ||
+                    p.name.toLowerCase().includes('pot')
+                );
+                if (paintPots && referenceImages.length < 3) {
+                    referenceImages.push({
+                        imageBytes: paintPots.image.split(',')[1],
+                        mimeType: 'image/png',
+                    });
+                    console.log("Veo: Added Paint Pots as ingredient.");
+                }
+
+                // 3. Props: Template / Canvas
+                const template = products.find(p =>
+                    p.name.toLowerCase().includes('vorlage') ||
+                    p.name.toLowerCase().includes('malvorlage') ||
+                    p.name.toLowerCase().includes('template')
+                );
+                if (template && referenceImages.length < 3) {
+                    referenceImages.push({
+                        imageBytes: template.image.split(',')[1],
+                        mimeType: 'image/png',
+                    });
+                    console.log("Veo: Added Template as ingredient.");
+                }
+
+                // fallback to brushes if we have space
+                if (referenceImages.length < 3) {
+                    const brushes = products.find(p =>
+                        p.name.toLowerCase().includes('pinsel') ||
+                        p.name.toLowerCase().includes('brush')
+                    );
+                    if (brushes) {
+                        referenceImages.push({
+                            imageBytes: brushes.image.split(',')[1],
+                            mimeType: 'image/png',
+                        });
+                        console.log("Veo: Added Brushes as ingredient.");
+                    }
+                }
+
+                if (referenceImages.length > 0) {
+                    // Note: According to current API research, multiple images are passed in the config
+                    videoRequest.config.referenceImages = referenceImages;
+                    console.log(`Veo: Sending ${referenceImages.length} reference ingredients.`);
+                }
             } else {
                 console.log("Veo: Using text-only generation (better for audio/consistency).");
             }
+
 
             // Start the async video generation
             let operation = await (ai.models as any).generateVideos(videoRequest);
