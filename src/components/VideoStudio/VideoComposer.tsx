@@ -86,55 +86,70 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
 
             setGenerationProgress("Sende Anfrage an Veo 3.1...");
 
-            // Build image parts from selected products
-            const imageParts = selectedProducts.flatMap(p =>
-                p.images.slice(0, 2).map(img => ({
-                    inlineData: { data: img.split(',')[1], mimeType: 'image/png' }
-                }))
-            );
+            // Build the generateVideos request
+            const videoRequest: any = {
+                model: 'veo-3.1-generate-preview',
+                prompt: prompt,
+                config: {
+                    aspectRatio: selectedPreset.aspectRatio,
+                },
+            };
 
-            // Also include sourceImage if available
+            // Add source image if available (image-to-video)
             if (sourceImage) {
-                imageParts.push({
-                    inlineData: { data: sourceImage.split(',')[1], mimeType: 'image/png' }
-                });
+                videoRequest.image = {
+                    imageBytes: sourceImage.split(',')[1],
+                    mimeType: 'image/png',
+                };
             }
 
-            const response = await ai.models.generateContent({
-                model: 'veo-3.1-generate-preview',
+            // Start the async video generation
+            let operation = await (ai.models as any).generateVideos(videoRequest);
 
-                contents: {
-                    parts: [
-                        ...imageParts,
-                        { text: prompt }
-                    ]
-                },
-                config: {
-                    videoConfig: {
-                        aspectRatio: selectedPreset.aspectRatio,
-                    }
-                } as any,
-            });
+            setGenerationProgress("Video wird generiert... (kann 1-3 Minuten dauern)");
 
-            setGenerationProgress("Video wird verarbeitet...");
+            // Poll until done
+            let pollCount = 0;
+            while (!operation.done) {
+                pollCount++;
+                setGenerationProgress(`Video wird generiert... (${pollCount * 10}s)`);
+                await new Promise(resolve => setTimeout(resolve, 10000));
+                operation = await (ai.operations as any).getVideosOperation({ operation });
+            }
 
-            // Extract video from response
-            const videoPart = (response as any).candidates?.[0]?.content?.parts?.find(
-                (p: any) => p.inlineData?.mimeType?.startsWith('video/')
-            );
+            setGenerationProgress("Video wird heruntergeladen...");
 
-            if (videoPart?.inlineData) {
-                const mimeType = videoPart.inlineData.mimeType || 'video/mp4';
-                const blob = new Blob(
-                    [Uint8Array.from(atob(videoPart.inlineData.data), c => c.charCodeAt(0))],
-                    { type: mimeType }
-                );
-                const url = URL.createObjectURL(blob);
-                setVideoUrl(url);
-                setGenerationProgress(null);
-            } else {
+            // Get the generated video
+            const generatedVideo = operation.response?.generatedVideos?.[0];
+            if (!generatedVideo?.video) {
                 throw new Error("Veo hat kein gültiges Video zurückgegeben.");
             }
+
+            // Download as blob for browser preview
+            const videoFile = generatedVideo.video;
+            const downloadResponse = await (ai.files as any).download({ file: videoFile });
+
+            // Create blob URL for preview
+            let blob: Blob;
+            if (downloadResponse instanceof Blob) {
+                blob = downloadResponse;
+            } else if (downloadResponse?.arrayBuffer) {
+                const buffer = await downloadResponse.arrayBuffer();
+                blob = new Blob([buffer], { type: 'video/mp4' });
+            } else {
+                // Fallback: try to get video URI directly
+                const videoUri = videoFile.uri || videoFile.url;
+                if (videoUri) {
+                    const resp = await fetch(videoUri);
+                    blob = await resp.blob();
+                } else {
+                    throw new Error("Konnte das Video nicht herunterladen.");
+                }
+            }
+
+            const url = URL.createObjectURL(blob);
+            setVideoUrl(url);
+            setGenerationProgress(null);
 
         } catch (err: any) {
             console.error("Video generation failed:", err);
@@ -144,6 +159,7 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             setIsGenerating(false);
         }
     };
+
 
     return (
         <div className="bg-gray-800/40 rounded-[2.5rem] border border-white/5 shadow-2xl overflow-hidden">
