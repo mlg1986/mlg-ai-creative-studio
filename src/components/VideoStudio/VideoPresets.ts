@@ -1,6 +1,6 @@
 // --- VIDEO STUDIO PRESETS --- //
 
-export type VideoAspectRatio = '16:9' | '9:16' | '1:1';
+export type VideoAspectRatio = '16:9' | '9:16';
 export type CreativeMode = 'product' | 'creative';
 
 export interface PlatformPreset {
@@ -42,8 +42,8 @@ export const PRODUCT_VIDEO_PRESETS: PlatformPreset[] = [
         label: 'Produktseite',
         platform: 'E-Commerce',
         icon: '📦',
-        aspectRatio: '1:1',
-        width: 1080, height: 1080,
+        aspectRatio: '16:9', // Updated from 1:1
+        width: 1080, height: 608,
         minDuration: 5, maxDuration: 8, defaultDuration: 5,
         category: 'product',
     },
@@ -105,12 +105,13 @@ export const CREATIVE_PRESETS: PlatformPreset[] = [
         label: 'Facebook Ad',
         platform: 'Facebook',
         icon: '👍',
-        aspectRatio: '1:1',
-        width: 1080, height: 1080,
+        aspectRatio: '9:16', // Updated from 1:1
+        width: 1080, height: 1920,
         minDuration: 5, maxDuration: 10, defaultDuration: 6,
         category: 'creative',
     },
 ];
+
 
 export const ALL_PRESETS = [...PRODUCT_VIDEO_PRESETS, ...CREATIVE_PRESETS];
 
