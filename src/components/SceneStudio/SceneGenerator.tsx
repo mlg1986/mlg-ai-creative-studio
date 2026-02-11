@@ -87,11 +87,28 @@ export const SceneGenerator: React.FC<SceneGeneratorProps> = ({ products, onImag
 
             const propContext = selectedProducts.map(p => `- Prop: ${p.name} (Specs: ${p.specs || 'N/A'})`).join('\n');
 
-            const finalPrompt = `
-    SYSTEM DIRECTIVE: Professional Paint-by-Numbers Product Visualization.
-    PRODUCT: ${productMode === 'unframed'
+            const productModeText = productMode === 'colorin'
+                ? "MALEN NACH ZAHLEN (AUSMALEN). You are given a blank paint-by-numbers template with numbered zones and thin outlines. Your task is to ARTISTICALLY COLOR IN every numbered zone with rich, vibrant, realistic colors that bring the motif to life — as if a skilled painter has completed the painting. Keep the canvas texture visible. The result should look like a beautifully finished paint-by-numbers artwork, still on the canvas."
+                : productMode === 'unframed'
                     ? "MALEN NACH ZAHLEN (UNFRAMED). A flat canvas template lying open on a tabletop. The motif must show clear numbered zones and precise thin outlines. It looks like a kit in progress, ready to be painted."
-                    : "MALEN NACH ZAHLEN (FRAMED). The motif is stretched professionally over an internal wooden frame, displayed as a finished product."}
+                    : "MALEN NACH ZAHLEN (FRAMED). The motif is stretched professionally over an internal wooden frame, displayed as a finished product.";
+
+            const finalPrompt = productMode === 'colorin'
+                ? `
+    SYSTEM DIRECTIVE: Paint-by-Numbers Template Coloring.
+    TASK: ${productModeText}
+    
+    IMPORTANT RULES:
+    - Fill EVERY numbered zone with the correct, artistically chosen color.
+    - Preserve the canvas texture and slight brush-stroke feel.
+    - The numbers and outlines should become invisible under the paint, as in a completed painting.
+    - Use rich, harmonious colors that create a beautiful, cohesive artwork.
+    - The final result should look like a hand-painted masterpiece on canvas.
+    - SCENE CONTEXT: ${prompt}
+    `
+                : `
+    SYSTEM DIRECTIVE: Professional Paint-by-Numbers Product Visualization.
+    PRODUCT: ${productModeText}
     
     SCENE ARCHITECTURE:
     - BLUEPRINT LAYOUT: ${referenceImage ? 'Adopt the exact spatial positioning and furniture layout from the Reference Image.' : 'Generate a premium studio environment.'}
@@ -169,9 +186,10 @@ export const SceneGenerator: React.FC<SceneGeneratorProps> = ({ products, onImag
 
                     <div className="bg-gray-900/40 p-4 rounded-xl border border-gray-800">
                         <label className="block text-[10px] text-gray-500 mb-3 uppercase font-black tracking-widest text-center">Paint-by-Numbers Format</label>
-                        <div className="grid grid-cols-2 gap-3">
-                            <button onClick={() => setProductMode('unframed')} className={`py-2 px-3 rounded-lg text-[10px] font-black uppercase tracking-widest border transition-all ${productMode === 'unframed' ? 'bg-indigo-600 border-indigo-400 shadow-lg shadow-indigo-600/20' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}`}>Open Template</button>
-                            <button onClick={() => setProductMode('framed')} className={`py-2 px-3 rounded-lg text-[10px] font-black uppercase tracking-widest border transition-all ${productMode === 'framed' ? 'bg-indigo-600 border-indigo-400 shadow-lg shadow-indigo-600/20' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}`}>With Frame</button>
+                        <div className="grid grid-cols-3 gap-2">
+                            <button onClick={() => setProductMode('unframed')} className={`py-2 px-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all ${productMode === 'unframed' ? 'bg-indigo-600 border-indigo-400 shadow-lg shadow-indigo-600/20' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}`}>Vorlage</button>
+                            <button onClick={() => setProductMode('framed')} className={`py-2 px-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all ${productMode === 'framed' ? 'bg-indigo-600 border-indigo-400 shadow-lg shadow-indigo-600/20' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}`}>Gerahmt</button>
+                            <button onClick={() => setProductMode('colorin')} className={`py-2 px-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all ${productMode === 'colorin' ? 'bg-gradient-to-r from-amber-500 to-rose-500 border-amber-400 shadow-lg shadow-amber-600/20 text-white' : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}`}>🎨 Ausmalen</button>
                         </div>
                     </div>
                 </div>

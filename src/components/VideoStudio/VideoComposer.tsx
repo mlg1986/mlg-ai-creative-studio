@@ -101,7 +101,7 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             }
 
             const response = await ai.models.generateContent({
-                model: 'veo-3.1',
+                model: 'veo-3.1-generate-preview',
 
                 contents: {
                     parts: [

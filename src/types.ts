@@ -1,11 +1,11 @@
 export type AspectRatio = '16:9' | '1:1' | '3:4' | '4:3' | '9:16';
-export type PaintByNumbersMode = 'framed' | 'unframed';
+export type PaintByNumbersMode = 'framed' | 'unframed' | 'colorin';
 
 export interface ProductEntity {
     id: string;
     name: string;
     specs: string; // Dimensions, materials, etc.
-    images: string[]; 
+    images: string[];
     selected: boolean;
 }
 
