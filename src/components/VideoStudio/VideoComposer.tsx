@@ -37,6 +37,7 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
     const [selectedPresetId, setSelectedPresetId] = useState<string>('shop-banner');
     const [selectedStyleId, setSelectedStyleId] = useState<string>('cinematic');
     const [isFramed, setIsFramed] = useState(false);
+    const [useReference, setUseReference] = useState(true);
 
     // Prompt State
     const [scenePrompt, setScenePrompt] = useState("Ein gemütliches Wohnzimmer mit warmem Morgenlicht und einer kreativen Malstation.");
@@ -96,11 +97,14 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             };
 
             // Add source image if available (image-to-video)
-            if (sourceImage) {
+            if (sourceImage && useReference) {
                 videoRequest.image = {
                     imageBytes: sourceImage.split(',')[1],
                     mimeType: 'image/png',
                 };
+                console.log("Veo: Using reference image for generation.");
+            } else {
+                console.log("Veo: Using text-only generation (better for audio/consistency).");
             }
 
             // Start the async video generation
@@ -144,6 +148,13 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             }
 
             const blob = await downloadResp.blob();
+
+            // Check blob size to avoid "black video" cases (usually tiny dummy files)
+            if (blob.size < 10000) {
+                console.error("Veo generated a suspicious small video blob:", blob.size);
+                throw new Error("Das generierte Video scheint fehlerhaft zu sein (zu klein). Bitte erneut versuchen.");
+            }
+
             const url = URL.createObjectURL(blob);
             setVideoUrl(url);
             setGenerationProgress(null);
@@ -260,18 +271,28 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
 
             {/* Product Format Toggle */}
             <div className="px-6 mb-4">
-                <div className="flex items-center justify-between bg-black/20 p-4 rounded-xl border border-white/5">
-                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Canvas Format</span>
-                    <div className="flex gap-2">
-                        <button
-                            onClick={() => setIsFramed(false)}
-                            className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all ${!isFramed ? 'bg-indigo-600 text-white' : 'bg-white/5 text-gray-500'}`}
-                        >Offen</button>
-                        <button
-                            onClick={() => setIsFramed(true)}
-                            className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all ${isFramed ? 'bg-indigo-600 text-white' : 'bg-white/5 text-gray-500'}`}
-                        >Gerahmt</button>
+                <div className="flex items-center justify-between bg-black/20 p-4 rounded-xl border border-white/5 mb-3">
+                    <div className="flex items-center gap-2">
+                        <div className={`p-1.5 rounded-lg border transition-colors ${useReference ? 'bg-indigo-500/20 border-indigo-500/30' : 'bg-gray-800 border-gray-700'}`}>
+                            <SparklesIcon />
+                        </div>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Referenzbild nutzen</span>
                     </div>
+                    <button
+                        onClick={() => setUseReference(!useReference)}
+                        className={`w-10 h-5 rounded-full relative transition-colors ${useReference ? 'bg-indigo-600' : 'bg-gray-700'}`}
+                    >
+                        <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${useReference ? 'left-6' : 'left-1'}`} />
+                    </button>
+                </div>
+                <div className="flex items-center justify-between bg-black/20 p-4 rounded-xl border border-white/5">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-gray-400">Gerahmtes Produkt</span>
+                    <button
+                        onClick={() => setIsFramed(!isFramed)}
+                        className={`w-10 h-5 rounded-full relative transition-colors ${isFramed ? 'bg-purple-600' : 'bg-gray-700'}`}
+                    >
+                        <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isFramed ? 'left-6' : 'left-1'}`} />
+                    </button>
                 </div>
             </div>
 

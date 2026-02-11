@@ -155,6 +155,12 @@ export function buildProductVideoPrompt(
         ? productNames.map(n => `"${n}"`).join(', ')
         : 'a paint-by-numbers canvas kit';
 
+    let audioInstructions = "";
+    if (style.id === 'cinematic') audioInstructions = "Soft, atmospheric ambient music with gentle piano notes. Subtle sounds of wind or soft brush strokes.";
+    else if (style.id === 'energetic') audioInstructions = "Upbeat, rhythmical electronic beat. Short, crisp sound effects on camera movements.";
+    else if (style.id === 'minimal') audioInstructions = "Clean, high-fidelity room tone. Minimalist clicks or soft digital swells.";
+    else if (style.id === 'cozy') audioInstructions = "Cozy home sounds: birds chirping outside, a distant clock ticking, the soft scratch of a brush on canvas.";
+
     return `
 PRODUCT VIDEO — Professional Paint-by-Numbers Showcase.
 
@@ -167,6 +173,8 @@ PRODUCTS SHOWN: ${productList}
 SCENE: ${sceneDescription || 'A premium lifestyle setting that highlights the product.'}
 
 STYLE: ${style.promptModifier}
+
+AUDIO: ${audioInstructions}
 
 REQUIREMENTS:
 - The product must be the clear focal point of the video.
@@ -187,6 +195,12 @@ export function buildCreativePrompt(
         ? productNames.map(n => `"${n}"`).join(', ')
         : 'a paint-by-numbers canvas kit';
 
+    let audioInstructions = "";
+    if (style.id === 'cinematic') audioInstructions = "Cinematic orchestral swell. High-quality foley sounds of paper and canvas.";
+    else if (style.id === 'energetic') audioInstructions = "Trending fast-paced social media track. Energetic bass and rhythmic glitches.";
+    else if (style.id === 'minimal') audioInstructions = "Modern minimalist lo-fi beat. Airy and spacious soundscape.";
+    else if (style.id === 'cozy') audioInstructions = "Warm acoustic guitar melody. ASMR sounds of opening a paint kit and mixing colors.";
+
     return `
 SOCIAL MEDIA CREATIVE — ${platform.label} (${platform.platform})
 
@@ -200,6 +214,8 @@ SCENE: ${sceneDescription || 'An eye-catching setting optimized for social media
 
 STYLE: ${style.promptModifier}
 
+AUDIO: ${audioInstructions}
+
 PLATFORM-SPECIFIC:
 - Optimized for ${platform.platform} ${platform.label} format (${platform.aspectRatio}).
 - Content should be visually striking and stop-scrolling.
@@ -212,6 +228,7 @@ REQUIREMENTS:
 - The product must be clearly visible and the star of the content.
 `.trim();
 }
+
 
 // Cost estimation
 export function estimateCost(durationSeconds: number): string {
