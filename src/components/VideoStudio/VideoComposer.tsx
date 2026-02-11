@@ -93,6 +93,8 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
                 prompt: prompt,
                 config: {
                     aspectRatio: selectedPreset.aspectRatio,
+                    durationSeconds: duration, // Pass the chosen duration
+                    includeRaiReason: true,    // Get diagnostics for safety filters
                 },
             };
 
@@ -206,10 +208,15 @@ export const VideoComposer: React.FC<VideoComposerProps> = ({ products, sourceIm
             if (!generatedVideos || generatedVideos.length === 0) {
                 // Check if there was a safety filter
                 if (operation.response?.videoFilters) {
+                    const raiReasons = operation.response.videoFilters
+                        .map((f: any) => f.raiReason)
+                        .filter(Boolean)
+                        .join(', ');
+
                     console.warn("Veo Safety Filters triggered:", operation.response.videoFilters);
-                    throw new Error("Video wurde durch Sicherheitsfilter abgelehnt. Bitte ändere deinen Prompt.");
+                    throw new Error(`Video wurde durch Sicherheitsfilter abgelehnt. Grund: ${raiReasons || 'Unbekannt'}. Bitte ändere deinen Prompt.`);
                 }
-                throw new Error("Veo hat keine Videos in der Antwort generiert (möglicherweise ein Modell-Fehler).");
+                throw new Error("Veo hat keine Videos in der Antwort generiert (möglicherweise ein Modell-Fehler oder internes Problem).");
             }
 
             const generatedVideo = generatedVideos[0];
