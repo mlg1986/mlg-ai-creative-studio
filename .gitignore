@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and debug
+*.log
+.cursor/debug.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Archives (if not needed in repo)
+*.zip
+
+# Database (local state)
+*.db
+*.db-shm
+*.db-wal
+
+# Playwright browsers
+**/pw-browsers/

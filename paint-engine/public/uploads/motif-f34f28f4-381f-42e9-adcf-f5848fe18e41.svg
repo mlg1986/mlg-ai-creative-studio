@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1200" height="500" viewBox="0 0 1200 500" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .main {
+      font-family: 'Arial Rounded MT Bold', 'Helvetica Rounded', Arial, sans-serif;
+      font-weight: 700;
+      font-size: 140px;
+      fill: #000000;
+    }
+    .sub {
+      font-family: Arial, sans-serif;
+      font-weight: 300;
+      font-size: 60px;
+      letter-spacing: 8px;
+      fill: #555555;
+    }
+  </style>
+  
+  <!-- Main Text -->
+  <text x="100" y="220" class="main">wegweisend.</text>
+  
+  <!-- Sub Text -->
+  <text x="105" y="320" class="sub">DIGITAL</text>
+</svg>
