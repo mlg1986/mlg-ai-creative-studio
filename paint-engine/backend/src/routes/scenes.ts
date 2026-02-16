@@ -702,23 +702,27 @@ export function createScenesRouter(db: Database.Database) {
     });
   }));
 
-  // POST generate format variant from existing scene
+  // POST generate format variant from existing scene (image-to-image: use source image, only change aspect ratio)
   router.post('/:id/variant', asyncHandler(async (req, res) => {
     const sourceScene = db.prepare('SELECT * FROM scenes WHERE id = ?').get(req.params.id) as any;
     if (!sourceScene) throw new NotFoundError('scene', req.params.id);
-    if (!sourceScene.enriched_prompt) {
-      throw new ValidationError('Die Quell-Szene hat keinen angereicherten Prompt. Generiere zuerst ein Bild.');
+    if (!sourceScene.image_path) {
+      throw new ValidationError('Die Quell-Szene hat noch kein Bild. Generiere zuerst ein Bild, dann kannst du eine Format-Variante erstellen.');
+    }
+    const sourceImagePath = path.join(process.cwd(), '..', 'public', sourceScene.image_path);
+    if (!fs.existsSync(sourceImagePath)) {
+      throw new ValidationError('Quell-Bilddatei nicht gefunden. Variante kann nicht erstellt werden.');
     }
 
     const { exportPreset } = req.body;
     if (!exportPreset) throw new ValidationError('Export-Preset ist erforderlich.');
 
-    // Get materials from source scene
+    // Get materials from source scene (same materials as source; do not require 'engaged' so variant matches source)
     const materials = db.prepare(`
       SELECT m.*, mi.image_path as img_path, mi.perspective FROM materials m
       JOIN scene_materials sm ON sm.material_id = m.id
       LEFT JOIN material_images mi ON mi.material_id = m.id
-      WHERE sm.scene_id = ? AND m.status = 'engaged'
+      WHERE sm.scene_id = ? AND m.status != 'idle'
     `).all(sourceScene.id) as any[];
 
     const materialMap = new Map<string, any>();
@@ -771,12 +775,10 @@ export function createScenesRouter(db: Database.Database) {
 
     res.status(201).json({ id: sceneId, image_status: 'generating', message: 'Format variant generation started' });
 
-    // Background: reuse enriched prompt but with new aspect ratio
-    const promptTags = sourceScene.prompt_tags ? JSON.parse(sourceScene.prompt_tags) : [];
-    generateImage(db, sceneId, jobId, Array.from(materialMap.values()), template,
-      sourceScene.scene_description, sourceScene.format, exportPreset, sourceScene.blueprint_image_path, variantMotifPaths, promptTags, variantExtraRefPaths).catch(err => {
-        logger.error('scenes', `Variant generation failed for scene ${sceneId}`, { error: err?.message });
-      });
+    // Background: image-to-image – take source scene's image and reformat to target aspect ratio only (no new scene from text)
+    generateImageFormatVariant(db, sceneId, jobId, sourceScene, exportPreset).catch(err => {
+      logger.error('scenes', `Format variant generation failed for scene ${sceneId}`, { error: err?.message });
+    });
   }));
 
   // POST vision-correction (analyze image and regenerate)
@@ -872,6 +874,92 @@ ${scene.enriched_prompt?.slice(0, 800)}`;
   return router;
 }
 
+/** Options for generateImage. When existingEnrichedPrompt is set, Scene Intelligence is skipped (format variant flow). */
+interface GenerateImageOptions {
+  existingEnrichedPrompt?: string | null;
+}
+
+/**
+ * Format variant: use the source scene's rendered image and ask the model to output the EXACT SAME image
+ * in the target aspect ratio only. No new composition, no new frames – just reformat the reference image.
+ */
+async function generateImageFormatVariant(
+  db: Database.Database,
+  variantSceneId: string,
+  jobId: string,
+  sourceScene: any,
+  targetExportPreset: string
+): Promise<void> {
+  try {
+    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
+      || process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === 'your-api-key-here') {
+      const msg = 'Kein gültiger API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Gemini API-Key hinterlegen.';
+      db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, variantSceneId);
+      db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
+      return;
+    }
+    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
+    const provider = getImageProvider(providerName, apiKey);
+
+    const sourcePath = path.join(process.cwd(), '..', 'public', sourceScene.image_path);
+    if (!fs.existsSync(sourcePath)) {
+      const msg = 'Quell-Bilddatei nicht gefunden.';
+      db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, variantSceneId);
+      db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
+      return;
+    }
+    const imageData = fs.readFileSync(sourcePath);
+    const ext = path.extname(sourcePath).toLowerCase();
+    const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+    const sourceImage = { base64: imageData.toString('base64'), mimeType };
+
+    let targetAspectRatio = EXPORT_PRESET_TO_ASPECT_RATIO[targetExportPreset] || '3:2';
+    const presetRow = db.prepare('SELECT width, height FROM export_presets WHERE id = ?').get(targetExportPreset) as any;
+    if (presetRow) {
+      targetAspectRatio = widthHeightToAspectRatio(presetRow.width, presetRow.height);
+    }
+
+    const prompt = `TASK: CONVERT SOURCE IMAGE TO NEW FORMAT – SAME ROOM, SAME STYLE, COMPLETE IMAGE
+
+The FIRST image attached is the SOURCE. Output the SAME scene in aspect ratio ${targetAspectRatio}. The result must be a complete, intentional image – never half-missing or obviously cropped.
+
+RULES:
+- Same room, same style, same atmosphere. "Umgemünzt" = fully adapted to the new format so the image feels whole.
+- Do NOT deliver an image where half the content is missing or cut off. The output must look like it was always meant to be in this format.
+- If the new format is taller: extend the background/room (same style) upward or downward so the scene is complete. If wider: extend left/right. If you need to recompose slightly so the main subjects fit fully in the new frame, do so while keeping the same space and style.
+- Do NOT add new/different elements (no new picture frames, no different canvas style). Keep materials, motifs, and lighting as in the source. Only adapt framing and background extent so the image is complete in aspect ratio ${targetAspectRatio}.
+- Output exactly one image, aspect ratio ${targetAspectRatio}, that looks complete and professional.`;
+
+    logger.info('scenes', `Format variant for scene ${variantSceneId}: reformatting source image to aspect=${targetAspectRatio}`);
+    const result = await provider.generateImage({
+      prompt,
+      referenceImages: [],
+      aspectRatio: targetAspectRatio,
+      imageSize: '2K',
+      sourceImage,
+    });
+
+    fs.mkdirSync(rendersDir, { recursive: true });
+    const imagePath = `/renders/${variantSceneId}.png`;
+    const fullPath = path.join(process.cwd(), '..', 'public', imagePath);
+    fs.writeFileSync(fullPath, Buffer.from(result.imageBase64, 'base64'));
+
+    db.prepare("UPDATE scenes SET image_path = ?, image_status = 'done', last_error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .run(imagePath, variantSceneId);
+    db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ? WHERE id = ?")
+      .run(result.cost || 0.04, jobId);
+
+    logger.info('scenes', `Format variant generated for scene ${variantSceneId}`);
+  } catch (error: any) {
+    const errorMsg = error?.message || 'Unknown error';
+    logger.error('scenes', `Format variant failed for scene ${variantSceneId}`, { error: errorMsg });
+    db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(errorMsg, variantSceneId);
+    db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .run(errorMsg, jobId);
+  }
+}
+
 async function generateImage(
   db: Database.Database,
   sceneId: string,
@@ -884,7 +972,8 @@ async function generateImage(
   blueprintImagePath: string | null,
   motifImagePaths: string[],
   promptTags: string[] = [],
-  extraRefImagePaths: string[] = []
+  extraRefImagePaths: string[] = [],
+  options?: GenerateImageOptions
 ): Promise<void> {
   try {
     const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
@@ -902,7 +991,25 @@ async function generateImage(
     const activeMaterials = materials.filter(m => m.status !== 'idle');
     const motifPaths = Array.isArray(motifImagePaths) ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES) : [];
     const hasMotif = motifPaths.length > 0;
+    const materialCategories = activeMaterials.map((m: any) => m.category);
 
+    // Resolve aspect ratio (needed for both normal and format-variant paths)
+    let aspectRatio = EXPORT_PRESET_TO_ASPECT_RATIO[exportPreset || 'free'] || '3:2';
+    const presetRowForAr = db.prepare('SELECT width, height FROM export_presets WHERE id = ?').get(exportPreset || 'free') as any;
+    if (presetRowForAr) {
+      aspectRatio = widthHeightToAspectRatio(presetRowForAr.width, presetRowForAr.height);
+    }
+
+    let enrichedPromptWithPatterns: string;
+
+    if (options?.existingEnrichedPrompt?.trim()) {
+      // Format variant: reuse existing enriched prompt, skip Scene Intelligence. Same content/style, only aspect ratio changes.
+      const variantInstruction = `FORMAT VARIANT – SAME CONTENT, NEW ASPECT RATIO ONLY (target aspect ratio: ${aspectRatio}): The following scene description is fixed. Generate the SAME scene with the SAME composition, materials, style (e.g. stretched canvas / gerahmt, no classic frame), and mood. Only the output aspect ratio is different. Do not change or reinterpret the scene.\n\n`;
+      const baseEnriched = variantInstruction + options.existingEnrichedPrompt.trim();
+      enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, baseEnriched);
+      db.prepare('UPDATE scenes SET enriched_prompt = ? WHERE id = ?').run(enrichedPromptWithPatterns, sceneId);
+      logger.info('scenes', `Format variant for scene ${sceneId}: reusing enriched prompt, aspect=${aspectRatio}`);
+    } else {
     // Build material context
     const materialContext = buildSceneMaterialContext(activeMaterials);
 
@@ -936,7 +1043,6 @@ async function generateImage(
       ? `## Scene Elements & Context:\n${tagPrompts.map(p => `- ${p}`).join('\n')}`
       : '';
 
-    const materialCategories = activeMaterials.map((m: any) => m.category);
     const materialRestriction = buildMaterialRestrictionPrompt(materialCategories);
 
     const materialsSection = activeMaterials.length > 0
@@ -971,19 +1077,14 @@ async function generateImage(
     }
 
     // === NEW: Inject successful patterns from memory ===
-    const enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, enrichedPrompt);
+    enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, enrichedPrompt);
 
     db.prepare('UPDATE scenes SET enriched_prompt = ? WHERE id = ?').run(enrichedPromptWithPatterns, sceneId);
+    }
 
     // Collect reference images
     const referenceImages = collectReferenceImages(activeMaterials, blueprintImagePath, motifPaths, extraRefImagePaths);
 
-    // Resolve aspect ratio
-    let aspectRatio = EXPORT_PRESET_TO_ASPECT_RATIO[exportPreset || 'free'] || '3:2';
-    const presetRow = db.prepare('SELECT width, height FROM export_presets WHERE id = ?').get(exportPreset || 'free') as any;
-    if (presetRow) {
-      aspectRatio = widthHeightToAspectRatio(presetRow.width, presetRow.height);
-    }
     const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags);
 
     logger.info('scenes', `Generating image for scene ${sceneId} with ${referenceImages.length} reference images, aspect=${aspectRatio}`);
