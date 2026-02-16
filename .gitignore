@@ -8,22 +8,34 @@ node_modules/
 
 # Build output
 dist/
+dist-ssr
 *.tsbuildinfo
+*.local
 
 # OS
 .DS_Store
 Thumbs.db
 
 # Logs and debug
+logs
 *.log
 .cursor/debug.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
 # Archives (if not needed in repo)
 *.zip
@@ -32,6 +44,7 @@ npm-debug.log*
 *.db
 *.db-shm
 *.db-wal
+server/studio.db
 
 # Playwright browsers
 **/pw-browsers/
