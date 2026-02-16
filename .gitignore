@@ -48,3 +48,8 @@ server/studio.db
 
 # Playwright browsers
 **/pw-browsers/
+
+# Generated assets (renders, user uploads)
+paint-engine/public/renders/
+paint-engine/public/uploads/
+.vite/

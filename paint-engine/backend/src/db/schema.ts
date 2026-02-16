@@ -61,8 +61,11 @@ export function initDatabase(db: Database.Database) {
       enriched_prompt TEXT,
       format TEXT,
       export_preset TEXT,
+      target_width INTEGER,
+      target_height INTEGER,
       blueprint_image_path TEXT,
       motif_image_path TEXT,
+      extra_reference_paths TEXT,
       image_path TEXT,
       image_status TEXT DEFAULT 'draft',
       video_prompt TEXT,
@@ -198,6 +201,25 @@ export function initDatabase(db: Database.Database) {
     try {
       db.exec("ALTER TABLE scenes ADD COLUMN video_verification_score INTEGER");
       logger.info('db', 'Migrated: added video_verification_score to scenes');
+    } catch { /* already exists */ }
+  }
+
+  try {
+    db.prepare("SELECT target_width FROM scenes LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE scenes ADD COLUMN target_width INTEGER");
+      db.exec("ALTER TABLE scenes ADD COLUMN target_height INTEGER");
+      logger.info('db', 'Migrated: added target_width, target_height to scenes');
+    } catch { /* already exists */ }
+  }
+
+  try {
+    db.prepare("SELECT extra_reference_paths FROM scenes LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE scenes ADD COLUMN extra_reference_paths TEXT");
+      logger.info('db', 'Migrated: added extra_reference_paths (JSON array) to scenes');
     } catch { /* already exists */ }
   }
 

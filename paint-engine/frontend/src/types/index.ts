@@ -55,10 +55,14 @@ export interface Scene {
   enriched_prompt?: string;
   format?: string;
   export_preset?: string;
+  target_width?: number | null;
+  target_height?: number | null;
   blueprint_image_path?: string;
   motif_image_path?: string;
   /** JSON array of motif image paths when multiple are uploaded (max 4). */
   motif_image_paths?: string | null;
+  /** JSON array of extra reference image paths (person, objects, etc.). */
+  extra_reference_paths?: string | null;
   image_path?: string;
   image_status: 'draft' | 'generating' | 'done' | 'failed';
   video_prompt?: string;

@@ -48,7 +48,7 @@ export class GoogleProvider implements AIProvider {
       }
 
       if (imageParts.length > 0) {
-        parts.push({ text: "REFERENCE IMAGES (Use these as examples for material appearance, textures, and style. DO NOT copy their composition - ONLY their physical properties):" });
+        parts.push({ text: "REFERENCE IMAGES (Material references for appearance/texture, plus uploaded blueprints and motif images. Follow the detailed instructions in the prompt for how to use each type):" });
         parts.push(...imageParts);
         parts.push({ text: "\n---" });
       }

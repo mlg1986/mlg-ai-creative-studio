@@ -1,11 +1,22 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Scene } from '../types';
 import { api } from '../services/api';
 
 export function useScene() {
   const [currentScene, setCurrentScene] = useState<Scene | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [generatedFromNew, setGeneratedFromNew] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // When no scene is selected, we're not in "edit from gallery" mode
+  useEffect(() => {
+    if (!currentScene) setGeneratedFromNew(false);
+  }, [currentScene]);
+
+  const selectScene = useCallback((scene: Scene | null) => {
+    setCurrentScene(scene);
+    setGeneratedFromNew(false);
+  }, []);
 
   const generateImage = useCallback(async (data: {
     projectId?: string;
@@ -22,6 +33,7 @@ export function useScene() {
     setGenerating(true);
     try {
       const result = await api.scenes.create(data);
+      setGeneratedFromNew(true);
       setCurrentScene({ id: result.id, image_status: 'generating' } as Scene);
 
       // Start polling
@@ -108,10 +120,10 @@ export function useScene() {
     }
   }, []);
 
-  const prepareRefinement = useCallback(async (materialIds?: string[]) => {
+  const prepareRefinement = useCallback(async (materialIds?: string[], hasExtensionImage?: boolean) => {
     if (!currentScene) return null;
     try {
-      const response = await api.scenes.prepareRefinement(currentScene.id, materialIds);
+      const response = await api.scenes.prepareRefinement(currentScene.id, materialIds, hasExtensionImage);
       return response.promptAddendum;
     } catch (err) {
       console.error('Failed to prepare refinement:', err);
@@ -119,11 +131,11 @@ export function useScene() {
     }
   }, [currentScene]);
 
-  const regenerateWithFeedback = useCallback(async (materialIds?: string[], promptAddendum?: string) => {
+  const regenerateWithFeedback = useCallback(async (materialIds?: string[], promptAddendum?: string, extraReferencePaths?: string[]) => {
     if (!currentScene) return;
     setGenerating(true);
     try {
-      await api.scenes.regenerateWithFeedback(currentScene.id, materialIds, promptAddendum);
+      await api.scenes.regenerateWithFeedback(currentScene.id, materialIds, promptAddendum, extraReferencePaths);
       setCurrentScene(prev => prev ? { ...prev, image_status: 'generating' } : null);
 
       pollRef.current = setInterval(async () => {
@@ -166,6 +178,7 @@ export function useScene() {
   return {
     currentScene,
     generating,
+    generatedFromNew,
     generateImage,
     regenerate,
     regenerateWithFeedback,
@@ -173,6 +186,7 @@ export function useScene() {
     visionCorrection,
     generateVideo,
     generateVariant,
-    setCurrentScene
+    setCurrentScene,
+    selectScene,
   };
 }

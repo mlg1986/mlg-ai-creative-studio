@@ -22,6 +22,7 @@ export function SceneVersions({ sceneId, currentVersionTimestamp, onRestore }: P
     const [loading, setLoading] = useState(false);
     const [expanded, setExpanded] = useState(false);
     const [restoringId, setRestoringId] = useState<string | null>(null);
+    const [deletingId, setDeletingId] = useState<string | null>(null);
 
     useEffect(() => {
         // Load versions on mount or when timestamp changes
@@ -51,7 +52,7 @@ export function SceneVersions({ sceneId, currentVersionTimestamp, onRestore }: P
     };
 
     const handleRestore = async (version: SceneVersion) => {
-        if (!window.confirm(`Version ${version.version_number} wiederherstellen? Dies wird das aktuelle Bild überschreiben.`)) return;
+        if (!window.confirm(`Version v${version.version_number} öffnen?`)) return;
 
         setRestoringId(version.id);
         try {
@@ -66,9 +67,24 @@ export function SceneVersions({ sceneId, currentVersionTimestamp, onRestore }: P
             }
         } catch (err) {
             console.error('Restore failed', err);
-            alert('Fehler beim Wiederherstellen');
+            alert('Fehler beim Öffnen');
         } finally {
             setRestoringId(null);
+        }
+    };
+
+    const handleDelete = async (version: SceneVersion) => {
+        if (!window.confirm(`Version v${version.version_number} wirklich löschen? Das Bild wird dauerhaft entfernt.`)) return;
+
+        setDeletingId(version.id);
+        try {
+            await api.scenes.deleteVersion(sceneId, version.id);
+            await loadVersions();
+        } catch (err) {
+            console.error('Delete version failed', err);
+            alert('Löschen fehlgeschlagen');
+        } finally {
+            setDeletingId(null);
         }
     };
 
@@ -123,13 +139,23 @@ export function SceneVersions({ sceneId, currentVersionTimestamp, onRestore }: P
                                                 {ver.prompt}
                                             </p>
                                         )}
-                                        <button
-                                            onClick={() => handleRestore(ver)}
-                                            disabled={!!restoringId}
-                                            className="w-full py-1 rounded bg-white/5 hover:bg-purple-600/20 text-[10px] text-gray-400 hover:text-purple-300 border border-white/5 hover:border-purple-500/30 transition-all uppercase tracking-wide font-medium"
-                                        >
-                                            {restoringId === ver.id ? 'Lädt...' : 'Wiederherstellen'}
-                                        </button>
+                                        <div className="flex gap-1.5">
+                                            <button
+                                                onClick={() => handleRestore(ver)}
+                                                disabled={!!restoringId || !!deletingId}
+                                                className="flex-1 py-1 rounded bg-white/5 hover:bg-purple-600/20 text-[10px] text-gray-400 hover:text-purple-300 border border-white/5 hover:border-purple-500/30 transition-all uppercase tracking-wide font-medium"
+                                            >
+                                                {restoringId === ver.id ? 'Lädt...' : 'Öffnen'}
+                                            </button>
+                                            <button
+                                                onClick={() => handleDelete(ver)}
+                                                disabled={!!restoringId || !!deletingId}
+                                                className="py-1 px-2 rounded bg-white/5 hover:bg-red-600/20 text-[10px] text-gray-400 hover:text-red-300 border border-white/5 hover:border-red-500/30 transition-all uppercase tracking-wide font-medium"
+                                                title="Version löschen"
+                                            >
+                                                {deletingId === ver.id ? '…' : 'Löschen'}
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             ))}

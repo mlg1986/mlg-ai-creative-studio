@@ -7,6 +7,7 @@ import { FormatSelector } from './components/Scene/FormatSelector';
 import { ExportPresets } from './components/Scene/ExportPresets';
 import { BlueprintUpload } from './components/Scene/BlueprintUpload';
 import { MotifUpload } from './components/Scene/MotifUpload';
+import { ExtraReferenceUpload } from './components/Scene/ExtraReferenceUpload';
 import { MaterialSelector } from './components/Scene/MaterialSelector';
 import { ImagePreview } from './components/Preview/ImagePreview';
 import { VideoPanel } from './components/Video/VideoPanel';
@@ -22,7 +23,9 @@ import { api } from './services/api';
 export default function App() {
   const { materials, engagedMaterials, loading, refresh, toggleStatus, deleteMaterial } = useMaterials();
   const { templates, refresh: refreshTemplates } = useTemplates();
-  const { currentScene, generating, generateImage, regenerate, regenerateWithFeedback, prepareRefinement, generateVideo, generateVariant, visionCorrection, setCurrentScene } = useScene();
+  const { currentScene, generating, generatedFromNew, generateImage, regenerate, regenerateWithFeedback, prepareRefinement, generateVideo, generateVariant, visionCorrection, setCurrentScene, selectScene } = useScene();
+
+  const isEditMode = !!currentScene && !generatedFromNew;
   const { presets, createPreset, deletePreset } = usePresets();
 
   const [galleryKey, setGalleryKey] = useState(0);
@@ -32,6 +35,7 @@ export default function App() {
   const [exportPreset, setExportPreset] = useState('');
   const [blueprintPath, setBlueprintPath] = useState<string | null>(null);
   const [motifPaths, setMotifPaths] = useState<string[]>([]);
+  const [extraReferencePaths, setExtraReferencePaths] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showVideoPanel, setShowVideoPanel] = useState(false);
@@ -51,13 +55,14 @@ export default function App() {
     }
   }, [presets, exportPreset]);
 
-  // When editing a scene: fill sidebar from scene data (only when scene id changes, so we don't overwrite user edits)
+  // When editing a scene (from gallery): fill sidebar from scene data (only when scene id changes). Skip when scene was just generated so form data stays.
   useEffect(() => {
     if (!currentScene) {
       lastSyncedSceneIdRef.current = null;
       setSceneMaterialIds([]);
       return;
     }
+    if (!isEditMode) return;
     if (lastSyncedSceneIdRef.current === currentScene.id) return;
     lastSyncedSceneIdRef.current = currentScene.id;
 
@@ -79,6 +84,16 @@ export default function App() {
       paths = [currentScene.motif_image_path];
     }
     setMotifPaths(paths);
+    let extraRefParsed: string[] = [];
+    if (currentScene.extra_reference_paths) {
+      try {
+        const parsed = JSON.parse(currentScene.extra_reference_paths as unknown as string);
+        extraRefParsed = Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+      } catch {
+        extraRefParsed = [];
+      }
+    }
+    setExtraReferencePaths(extraRefParsed);
     if (currentScene.prompt_tags) {
       try {
         const parsed = typeof currentScene.prompt_tags === 'string'
@@ -91,18 +106,18 @@ export default function App() {
       setSelectedTags([]);
     }
     setSceneMaterialIds(currentScene.materials?.map(m => m.id) ?? []);
-  }, [currentScene?.id]);
+  }, [currentScene?.id, isEditMode]);
 
-  // Fill scene description with template prompt when a template is selected (only when not editing a scene)
+  // Fill scene description with template prompt when a template is selected (only when not in edit mode)
   useEffect(() => {
-    if (currentScene) return;
+    if (isEditMode) return;
     if (selectedTemplate && templates.length > 0) {
       const template = templates.find(t => t.id === selectedTemplate);
       if (template?.prompt_template) setSceneDescription(template.prompt_template);
     } else if (!selectedTemplate) {
       setSceneDescription('');
     }
-  }, [currentScene, selectedTemplate, templates]);
+  }, [isEditMode, selectedTemplate, templates]);
 
   const toggleTag = (id: string) => {
     setSelectedTags(prev =>
@@ -110,7 +125,7 @@ export default function App() {
     );
   };
 
-  const hasMnzMotif = (currentScene ? materials.filter(m => sceneMaterialIds.includes(m.id)) : engagedMaterials).some(m => m.category === 'mnz_motif');
+  const hasMnzMotif = (isEditMode ? materials.filter(m => sceneMaterialIds.includes(m.id)) : engagedMaterials).some(m => m.category === 'mnz_motif');
   const costEstimate = (0.04 + 0.01).toFixed(2); // Scene Intelligence + Image
 
   const handleSaveScene = async () => {
@@ -126,6 +141,7 @@ export default function App() {
         export_preset: exportPreset || null,
         blueprint_image_path: blueprintPath || null,
         motif_image_paths: motifPaths.length > 0 ? motifPaths : null,
+        extra_reference_paths: extraReferencePaths.length > 0 ? extraReferencePaths : null,
         materialIds: sceneMaterialIds,
       });
       setCurrentScene(updated);
@@ -152,6 +168,7 @@ export default function App() {
       promptTags: selectedTags.length > 0 ? selectedTags : undefined,
       blueprintImagePath: blueprintPath || undefined,
       motifImagePaths: motifPaths.length ? motifPaths : undefined,
+      extraReferencePaths: extraReferencePaths.length ? extraReferencePaths : undefined,
     };
     console.log('[App] Generating image:', payload);
     generateImage(payload);
@@ -196,6 +213,39 @@ export default function App() {
       <div className="flex h-[calc(100vh-57px)]">
         {/* Sidebar */}
         <aside className="w-[360px] border-r border-white/5 overflow-y-auto p-4 space-y-6 flex-shrink-0">
+          {/* Bearbeitungs-Modus-Banner (nur bei Bearbeitung aus Galerie, nicht nach Generieren) */}
+          {isEditMode && (
+            <div className="rounded-xl border border-purple-500/30 bg-purple-500/10 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] uppercase tracking-wider text-purple-400 font-bold">Bearbeitung</div>
+                  <div className="text-sm font-medium text-gray-200 truncate">{currentScene.name || 'Szene'}</div>
+                  <div className="text-xs text-gray-500">
+                    {currentScene.target_width != null && currentScene.target_height != null
+                      ? `${currentScene.target_width} × ${currentScene.target_height} px`
+                      : currentScene.export_preset || '–'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => selectScene(null)}
+                  className="flex-shrink-0 p-1.5 rounded-lg border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                  title="Schließen"
+                  aria-label="Bearbeitung schließen"
+                >
+                  ✕
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => selectScene(null)}
+                className="w-full py-2 rounded-lg border border-white/10 text-xs font-medium text-gray-300 hover:bg-white/5 transition-colors"
+              >
+                Neue Szene erstellen
+              </button>
+            </div>
+          )}
+
           {/* Template Picker */}
           <TemplatePicker
             templates={templates}
@@ -208,7 +258,7 @@ export default function App() {
           <SceneDescription
             value={sceneDescription}
             onChange={setSceneDescription}
-            editingScene={!!currentScene}
+            editingScene={isEditMode}
           />
 
           {/* Scene Elements (Multi-Select Tags) */}
@@ -231,6 +281,12 @@ export default function App() {
             visible={true}
           />
 
+          {/* Extra Reference Images (Person, Objekte, etc.) */}
+          <ExtraReferenceUpload
+            value={extraReferencePaths}
+            onChange={setExtraReferencePaths}
+          />
+
           {/* Blueprint Upload */}
           <BlueprintUpload onUpload={setBlueprintPath} />
 
@@ -241,6 +297,7 @@ export default function App() {
             presets={presets}
             onCreatePreset={createPreset}
             onDeletePreset={deletePreset}
+            disabled={isEditMode}
           />
 
           {/* Materials – selection at bottom */}
@@ -249,19 +306,19 @@ export default function App() {
             onToggleStatus={toggleStatus}
             onDelete={deleteMaterial}
             onRefresh={refresh}
-            selectedIds={currentScene ? sceneMaterialIds : undefined}
-            onToggleId={currentScene ? (id) => setSceneMaterialIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]) : undefined}
+            selectedIds={isEditMode ? sceneMaterialIds : undefined}
+            onToggleId={isEditMode ? (id) => setSceneMaterialIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]) : undefined}
           />
 
           {/* Selected Materials */}
           <MaterialSelector
-            materials={currentScene ? materials.filter(m => sceneMaterialIds.includes(m.id)) : engagedMaterials}
-            onRemove={currentScene ? (id) => setSceneMaterialIds(prev => prev.filter(x => x !== id)) : handleDisengage}
+            materials={isEditMode ? materials.filter(m => sceneMaterialIds.includes(m.id)) : engagedMaterials}
+            onRemove={isEditMode ? (id) => setSceneMaterialIds(prev => prev.filter(x => x !== id)) : handleDisengage}
           />
 
-          {/* Generate / Save Button */}
+          {/* Generate / Save Button: "Szene speichern" nur im Bearbeitungsmodus (aus Galerie), sonst Generate */}
           <div>
-            {currentScene ? (
+            {isEditMode ? (
               <button
                 type="button"
                 onClick={handleSaveScene}
@@ -302,10 +359,11 @@ export default function App() {
             onPrepareRefinement={prepareRefinement}
             onVisionCorrection={visionCorrection}
             allMaterials={materials}
+            sceneMaterialIds={isEditMode ? sceneMaterialIds : undefined}
             onDelete={async () => {
               if (!currentScene) return;
               await api.scenes.delete(currentScene.id);
-              setCurrentScene(null);
+              selectScene(null);
               setGalleryKey(k => k + 1);
             }}
           />
@@ -322,7 +380,12 @@ export default function App() {
           <SceneGallery
             key={galleryKey}
             projectId="default"
-            onSelectScene={setCurrentScene}
+            onSelectScene={selectScene}
+            onDelete={async (sceneId) => {
+              await api.scenes.delete(sceneId);
+              if (currentScene?.id === sceneId) selectScene(null);
+              setGalleryKey(k => k + 1);
+            }}
           />
         </main>
       </div>

@@ -7,9 +7,11 @@ interface Props {
   presets: ExportPreset[];
   onCreatePreset: (name: string, width: number, height: number) => Promise<any>;
   onDeletePreset: (id: string) => Promise<void>;
+  /** When true, preset cannot be changed (e.g. when editing an existing scene). */
+  disabled?: boolean;
 }
 
-export function ExportPresets({ value, onChange, presets, onCreatePreset, onDeletePreset }: Props) {
+export function ExportPresets({ value, onChange, presets, onCreatePreset, onDeletePreset, disabled = false }: Props) {
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState('');
   const [newWidth, setNewWidth] = useState('1920');
@@ -42,18 +44,21 @@ export function ExportPresets({ value, onChange, presets, onCreatePreset, onDele
     <div>
       <div className="flex items-center justify-between mb-2">
         <h3 className="label-uppercase">Export Preset</h3>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="w-6 h-6 rounded-md bg-purple-600 hover:bg-purple-700 flex items-center justify-center text-xs font-bold"
-        >
-          +
-        </button>
+        {!disabled && (
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            className="w-6 h-6 rounded-md bg-purple-600 hover:bg-purple-700 flex items-center justify-center text-xs font-bold"
+          >
+            +
+          </button>
+        )}
       </div>
 
       <select
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500"
+        disabled={disabled}
+        className={`w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500 ${disabled ? 'opacity-70 cursor-not-allowed' : ''}`}
       >
         {presets.map(p => (
           <option key={p.id} value={p.id}>
@@ -61,9 +66,12 @@ export function ExportPresets({ value, onChange, presets, onCreatePreset, onDele
           </option>
         ))}
       </select>
+      {disabled && (
+        <p className="mt-1 text-[10px] text-gray-500 italic">Format kann bei bestehenden Szenen nicht geändert werden.</p>
+      )}
 
       {/* Custom presets list with delete */}
-      {presets.some(p => !p.is_builtin) && (
+      {!disabled && presets.some(p => !p.is_builtin) && (
         <div className="mt-2 space-y-1">
           {presets.filter(p => !p.is_builtin).map(p => (
             <div key={p.id} className="flex items-center justify-between bg-gray-800/30 rounded-lg px-2 py-1">
@@ -77,7 +85,7 @@ export function ExportPresets({ value, onChange, presets, onCreatePreset, onDele
       )}
 
       {/* Add new preset form */}
-      {showAdd && (
+      {!disabled && showAdd && (
         <div className="mt-2 p-3 bg-purple-500/5 rounded-lg border border-purple-500/20 space-y-2">
           <input
             value={newName}

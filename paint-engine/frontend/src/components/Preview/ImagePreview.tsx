@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Scene, ExportPreset, Material } from '../../types';
-import { api } from '../../services/api';
+import { api, showToast } from '../../services/api';
 import { SceneVersions } from './SceneVersions';
+
+const MAX_REFINEMENT_EXTRA_REFS = 4;
 
 interface Props {
   scene: Scene | null;
@@ -11,14 +13,16 @@ interface Props {
   onGenerateVariant?: (presetId: string) => void;
   presets?: ExportPreset[];
   onSceneUpdated?: (scene: Scene) => void;
-  onRegenerateWithFeedback?: (materialIds?: string[], promptAddendum?: string) => void;
-  onPrepareRefinement?: (materialIds?: string[]) => Promise<string | null>;
+  onRegenerateWithFeedback?: (materialIds?: string[], promptAddendum?: string, extraReferencePaths?: string[]) => void;
+  onPrepareRefinement?: (materialIds?: string[], hasExtensionImage?: boolean) => Promise<string | null>;
   onVisionCorrection?: () => void;
   onDelete?: () => void;
   allMaterials?: Material[];
+  /** IDs of materials selected for current scene (from sidebar) */
+  sceneMaterialIds?: string[];
 }
 
-export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo, onGenerateVariant, presets, onSceneUpdated, onRegenerateWithFeedback, onPrepareRefinement, onVisionCorrection, onDelete, allMaterials = [] }: Props) {
+export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo, onGenerateVariant, presets, onSceneUpdated, onRegenerateWithFeedback, onPrepareRefinement, onVisionCorrection, onDelete, allMaterials = [], sceneMaterialIds }: Props) {
   const [showVariantPicker, setShowVariantPicker] = useState(false);
   const [reviewNotes, setReviewNotes] = useState('');
   const [reviewRating, setReviewRating] = useState<number | ''>('');
@@ -28,19 +32,25 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
   const [selectedMaterialIds, setSelectedMaterialIds] = useState<string[]>([]);
   const [tempAddendum, setTempAddendum] = useState('');
   const [preparingRefinement, setPreparingRefinement] = useState(false);
+  const [refinementExtraPaths, setRefinementExtraPaths] = useState<string[]>([]);
+  const [refinementExtraUploading, setRefinementExtraUploading] = useState(false);
+  const refinementExtraInputRef = useRef<HTMLInputElement>(null);
 
-  // Engaged materials available for this refinement
-  const engagedMaterials = allMaterials.filter(m => m.status === 'engaged');
+  // Materials selected for refinement – prefer sceneMaterialIds (sidebar selection) over status field
+  const engagedMaterials = sceneMaterialIds
+    ? allMaterials.filter(m => sceneMaterialIds.includes(m.id))
+    : allMaterials.filter(m => m.status === 'engaged');
+  const engagedIdsKey = engagedMaterials.map(m => m.id).sort().join(',');
 
   useEffect(() => {
     if (scene?.review_notes !== undefined) setReviewNotes(scene.review_notes ?? '');
     if (scene?.review_rating !== undefined) setReviewRating(scene.review_rating ?? '');
   }, [scene?.id, scene?.review_notes, scene?.review_rating]);
 
-  // Reset selected materials when scene changes or materials change
+  // Sync selected materials whenever the set of engaged materials changes (e.g. IDLE -> AUSGEWAEHLT)
   useEffect(() => {
     setSelectedMaterialIds(engagedMaterials.map(m => m.id));
-  }, [scene?.id, allMaterials]);
+  }, [scene?.id, engagedIdsKey]);
 
   const toggleMaterial = (id: string) => {
     setSelectedMaterialIds(prev =>
@@ -66,7 +76,11 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
     if (!onPrepareRefinement) return;
     setPreparingRefinement(true);
     try {
-      const addendum = await onPrepareRefinement(selectedMaterialIds.length > 0 ? selectedMaterialIds : undefined);
+      const hasExt = refinementExtraPaths.length > 0;
+      const addendum = await onPrepareRefinement(
+        selectedMaterialIds.length > 0 ? selectedMaterialIds : undefined,
+        hasExt || undefined
+      );
       if (addendum) setTempAddendum(addendum);
     } finally {
       setPreparingRefinement(false);
@@ -74,11 +88,35 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
   };
 
   const handleRefinement = () => {
+    const idsToSend = [...new Set([...selectedMaterialIds, ...engagedMaterials.map(m => m.id)])];
     onRegenerateWithFeedback?.(
-      selectedMaterialIds,
-      tempAddendum.trim() || undefined
+      idsToSend,
+      tempAddendum.trim() || undefined,
+      refinementExtraPaths.length > 0 ? refinementExtraPaths : undefined
     );
     setShowRefinementSetup(false);
+  };
+
+  const handleRefinementExtraFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    e.target.value = '';
+    const toAdd = Math.min(files.length, MAX_REFINEMENT_EXTRA_REFS - refinementExtraPaths.length);
+    if (toAdd <= 0) return;
+    setRefinementExtraUploading(true);
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < toAdd; i++) formData.append('extraRef', files[i]);
+      const result = await api.scenes.uploadExtraReference(formData);
+      const paths = result.paths || [];
+      setRefinementExtraPaths(prev => [...prev, ...paths].slice(0, MAX_REFINEMENT_EXTRA_REFS));
+      showToast({ type: 'success', title: 'Referenzbild hochgeladen', message: `${paths.length} Bild(er) für diese Verfeinerung hinzugefügt.` });
+    } catch (err: any) {
+      const msg = err?.message || err?.error?.message || 'Upload fehlgeschlagen';
+      showToast({ type: 'error', title: 'Upload fehlgeschlagen', message: String(msg) });
+    } finally {
+      setRefinementExtraUploading(false);
+    }
   };
 
   if (!scene) {
@@ -135,6 +173,7 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
   const hasImage = !!(scene.image_path && scene.image_status !== 'generating' && !generating && scene.image_status !== 'failed');
   if (hasImage) {
     const hasFeedback = !!(scene.review_notes && scene.review_notes.trim());
+    const materialIdsToSend = [...new Set([...selectedMaterialIds, ...engagedMaterials.map(m => m.id)])];
     const selectedMaterials = engagedMaterials.filter(m => selectedMaterialIds.includes(m.id));
     const totalRefImages = selectedMaterials.reduce((sum, m) => sum + (m.images?.length || 0), 0);
     const motifCount = (() => {
@@ -149,6 +188,17 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
         return scene.motif_image_path ? 1 : 0;
       }
     })();
+    const sceneExtraRefCount = (() => {
+      try {
+        const p = scene.extra_reference_paths;
+        if (!p) return 0;
+        const arr = typeof p === 'string' ? JSON.parse(p) : p;
+        return Array.isArray(arr) ? arr.length : 0;
+      } catch {
+        return 0;
+      }
+    })();
+    const extraRefCount = sceneExtraRefCount + refinementExtraPaths.length;
 
     return (
       <div className="w-full flex-shrink-0 flex flex-col bg-gray-900/30 rounded-2xl border border-white/5 shadow-2xl relative">
@@ -285,6 +335,56 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
                       </div>
                     )}
 
+                    {/* Zusätzliches Bild für diese Verfeinerung */}
+                    <div className="space-y-2">
+                      <div className="text-[10px] uppercase tracking-wider text-gray-500 font-bold">
+                        Zusätzliches Bild für diese Verfeinerung
+                      </div>
+                      <p className="text-[10px] text-gray-500">
+                        Optional: Bild wird mitgeschickt. In den Korrektur-Anweisungen beschreiben, was damit passieren soll (z. B. „Person hinzufügen“, „Bild einbauen“). Max. {MAX_REFINEMENT_EXTRA_REFS} Bilder.
+                      </p>
+                      {refinementExtraPaths.length > 0 && (
+                        <div className="space-y-1.5">
+                          {refinementExtraPaths.map((path, index) => (
+                            <div key={path} className="flex items-center gap-2 p-2 rounded-lg border border-purple-500/20 bg-black/30">
+                              <div className="w-14 h-14 flex-shrink-0 rounded overflow-hidden border border-white/10 bg-gray-900/50">
+                                <img src={path} alt={`Referenz ${index + 1}`} className="w-full h-full object-contain" />
+                              </div>
+                              <div className="flex-1 min-w-0 text-[10px] text-gray-400">Referenzbild {index + 1}</div>
+                              <button
+                                type="button"
+                                onClick={() => setRefinementExtraPaths(prev => prev.filter((_, i) => i !== index))}
+                                className="p-1.5 rounded-full bg-red-500/20 hover:bg-red-500/40 text-red-400 text-xs"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ))}
+                          {refinementExtraUploading && (
+                            <div className="flex items-center gap-2 text-[10px] text-purple-400">
+                              <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                              Lade hoch...
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {refinementExtraPaths.length < MAX_REFINEMENT_EXTRA_REFS && (
+                        <label className="flex flex-col items-center justify-center border-2 border-dashed border-purple-500/20 rounded-lg p-3 cursor-pointer hover:border-purple-500/40 transition-colors">
+                          <span className="text-sm text-gray-400">📎 Referenzbild(er) hochladen</span>
+                          <input
+                            ref={refinementExtraInputRef}
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            onChange={handleRefinementExtraFile}
+                            disabled={refinementExtraUploading}
+                            className="hidden"
+                            aria-label="Referenzbild für Verfeinerung hochladen"
+                          />
+                        </label>
+                      )}
+                    </div>
+
                     {/* AI Instructions */}
                     <div className="space-y-3 pt-2">
                       <div className="flex items-center justify-between">
@@ -335,9 +435,18 @@ export function ImagePreview({ scene, generating, onRegenerate, onGenerateVideo,
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-[10px]">
                         <div className="text-gray-500">Zu bearbeitendes Bild: <span className="text-green-400 font-mono">SEND</span></div>
-                        <div className="text-gray-500 text-right">Materialien: <span className="text-gray-200">{selectedMaterialIds.length}</span> {selectedMaterialIds.length > 0 ? '(Referenzen mitgesendet)' : ''}</div>
+                        <div className="text-gray-500 text-right">Materialien: <span className="text-gray-200">{materialIdsToSend.length}</span> {materialIdsToSend.length > 0 ? '(Referenzen mitgesendet)' : ''}</div>
                         <div className="text-gray-500">Motive: <span className="text-gray-200">{motifCount}</span> {motifCount > 0 ? '(mitgesendet)' : ''}</div>
                         <div className="text-gray-500 text-right truncate">Feedback: {scene.review_notes?.trim() ? `${scene.review_notes.slice(0, 18)}…` : '–'}</div>
+                        {extraRefCount > 0 && (
+                          <div className="text-gray-500 col-span-2">Zusatzreferenzen: <span className="text-gray-200">{extraRefCount}</span> (mitgesendet)</div>
+                        )}
+                        {scene.target_width != null && scene.target_height != null && (
+                          <div className="text-gray-500 col-span-2">
+                            Format: <span className="text-gray-200 font-mono">{scene.target_width} × {scene.target_height} px</span>
+                            <span className="text-gray-500 ml-1">(Seitenverhältnis wird bei Verfeinerung beibehalten)</span>
+                          </div>
+                        )}
                         <div className="text-gray-500 col-span-2 text-right font-mono text-[9px]">v1.4-refine</div>
                       </div>
                     </div>

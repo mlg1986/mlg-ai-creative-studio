@@ -127,21 +127,26 @@ export const api = {
       blueprint_image_path?: string | null;
       motif_image_path?: string | null;
       motif_image_paths?: string[] | null;
+      extra_reference_paths?: string[] | null;
       materialIds?: string[];
     }) => apiFetch<Scene>(`/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: string) => apiFetch<{ success: boolean }>(`/scenes/${id}`, { method: 'DELETE' }),
     regenerate: (id: string) => apiFetch<{ id: string; image_status: string }>(`/scenes/${id}/regenerate`, {
       method: 'POST',
     }),
-    prepareRefinement: (id: string, materialIds?: string[]) =>
+    prepareRefinement: (id: string, materialIds?: string[], hasExtensionImage?: boolean) =>
       apiFetch<{ promptAddendum: string }>(`/scenes/${id}/prepare-refinement`, {
         method: 'POST',
-        body: JSON.stringify(materialIds ? { materialIds } : {}),
+        body: JSON.stringify({ ...(materialIds ? { materialIds } : {}), ...(hasExtensionImage ? { hasExtensionImage: true } : {}) }),
       }),
-    regenerateWithFeedback: (id: string, materialIds?: string[], promptAddendum?: string) =>
+    regenerateWithFeedback: (id: string, materialIds?: string[], promptAddendum?: string, extraReferencePaths?: string[]) =>
       apiFetch<{ id: string; image_status: string }>(`/scenes/${id}/regenerate-with-feedback`, {
         method: 'POST',
-        body: JSON.stringify({ materialIds, promptAddendum }),
+        body: JSON.stringify({
+          materialIds: Array.isArray(materialIds) ? materialIds : [],
+          promptAddendum: promptAddendum || undefined,
+          extraReferencePaths: extraReferencePaths?.length ? extraReferencePaths : undefined,
+        }),
       }),
     generateVideo: (sceneId: string, data: any) => apiFetch<any>(`/scenes/${sceneId}/video`, {
       method: 'POST', body: JSON.stringify(data),
@@ -151,9 +156,12 @@ export const api = {
       method: 'POST', body: JSON.stringify({ exportPreset }),
     }),
     uploadMotif: (formData: FormData) => apiUpload<{ paths: string[]; path?: string }>('/scenes/upload-motif', formData),
+    uploadExtraReference: (formData: FormData) => apiUpload<{ paths: string[] }>('/scenes/upload-extra-reference', formData),
     visionCorrection: (id: string) => apiFetch<{ id: string, image_status: string, message: string, analysis?: string }>(`/scenes/${id}/vision-correction`, {
       method: 'POST',
     }),
+    deleteVersion: (sceneId: string, versionId: string) =>
+      apiFetch<{ success: boolean }>(`/scenes/${sceneId}/versions/${versionId}`, { method: 'DELETE' }),
   },
   projects: {
     getAll: () => apiFetch<Project[]>('/projects'),

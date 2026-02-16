@@ -312,6 +312,7 @@ export function buildImageGenerationPrompt(
 The LAST reference images (one or more) are the ONLY motifs the user has uploaded. You MUST use ONLY these.
 - ONLY these uploaded motif images may appear as canvas/print graphics in the scene. Do NOT add any other motifs, illustrations, or graphics that were not uploaded.
 - Show ALL uploaded motif images (e.g. on canvases or as templates). Maintain each motif's composition, colors, and subject matter faithfully.
+- CRITICAL – MOTIF FORMAT MUST NEVER BE CHANGED: Preserve each motif's exact aspect ratio and proportions. Do NOT stretch, crop, distort, or alter the dimensions of any motif. Each motif must appear exactly as provided.
 - Each motif should be rendered as if printed/painted on a canvas or template with typical paint-by-numbers texture and style.
 - Do not invent or add any motif that is not in the provided motif reference images.`;
   }
@@ -356,13 +357,18 @@ CONTEXT PROVIDED:
 1. User Feedback: What the user wants to change.
 2. Original Scene Context: The background/mood of the scene.
 3. Material Context: GROUND TRUTH specifications of the materials in the scene (paint pots, brushes, canvas). Use this to ensure instructions are physically accurate.
+4. (Optional) EXTENSION IMAGE: If present, the user has uploaded an additional image that shows how a person/object should look. Only reference this if the section is present.
+5. (Optional) MATERIALS TO INCLUDE: If present, the user wants these additional materials added to the scene. Only reference this if the section is present.
 
 RULES:
-- Output ONLY the instructions as bullet points, no explanations or preamble.
+- STRICT FIDELITY: Output ONLY instructions that directly correspond to what the user explicitly wrote in their feedback. Do NOT invent, assume, or add any details the user did not mention (e.g. clothing style, hairstyle, pose, colors, accessories). If the user says "add a person", do NOT specify what the person wears or how they look unless the user described it.
+- Output ONLY the instructions as numbered bullet points, no explanations or preamble.
 - Each instruction should be one clear sentence (e.g. "Ensure the paint-by-numbers labels on the lids show 'A4' and 'X3' clearly.").
 - SCALE & FIDELITY: Use the material context to correct proportions (e.g. if a pot is 2cm and looks 10cm, instruct to reduce it).
 - LABELS: Labels on paint pots are ALPHA-NUMERIC and usually exactly 2 characters (e.g., A4, X3, Q5). Correct them if the user mentions they are wrong or if they look like plain numbers.
-- Keep language suitable for an image generation prompt.`;
+- Keep language suitable for an image generation prompt.
+- EXTENSION IMAGE RULE: If the context contains an "EXTENSION IMAGE" section, output exactly ONE instruction stating that the element to be added (person/object as described by the user) must match the appearance shown in the attached extension image. Do NOT invent any appearance details beyond what the user wrote and what the extension image shows.
+- MATERIALS TO INCLUDE RULE: If the context contains a "MATERIALS TO INCLUDE" section listing material names, output exactly ONE instruction stating that these materials must be visibly placed in the scene and their appearance must match the attached material reference images. Use the material names from the list.`;
 
 export const EXPORT_PRESET_TO_ASPECT_RATIO: Record<string, string> = {
   facebook_banner: '21:9',
