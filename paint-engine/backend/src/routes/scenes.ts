@@ -90,6 +90,26 @@ function getImageDimensionsFromFile(filePath: string): { width: number; height: 
   return null;
 }
 
+/** Resolve motif image paths (relative, e.g. /uploads/…) to full paths. */
+function resolveMotifFullPath(relPath: string): string {
+  return path.join(process.cwd(), '..', 'public', relPath.startsWith('/') ? relPath.slice(1) : relPath);
+}
+
+/**
+ * Read aspect ratio of each motif image from disk. Used so prompt generation can state exact formats.
+ * Returns one aspect-ratio string per motif (e.g. ['16:9', '1:1']); unknown/unreadable → '1:1' fallback.
+ */
+function getMotifAspectRatios(motifPaths: string[]): string[] {
+  const out: string[] = [];
+  for (const relPath of motifPaths) {
+    const fullPath = resolveMotifFullPath(relPath);
+    const dims = getImageDimensionsFromFile(fullPath);
+    const ar = dims ? widthHeightToAspectRatio(dims.width, dims.height) : '1:1';
+    out.push(ar);
+  }
+  return out;
+}
+
 function getImageProviderKeys(db: Database.Database): { geminiApiKey: string; replicateApiKey: string; openaiApiKey: string; imageProviderName: string } {
   const geminiApiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
     || process.env.GEMINI_API_KEY
@@ -1061,8 +1081,15 @@ async function buildPromptsForScene(
     ? `## Additional Reference Images (Person/Objects): ${extraRefImagePaths.length} extra reference image(s) have been provided by the user. These images show persons, objects, or visual references that the user may describe in their instructions above. The user can refer to them as "Extra-Referenzbild 1", "Extra-Referenzbild 2", etc. (numbered in order). Use these images to faithfully reproduce the depicted person/object/visual in the generated scene as described by the user. These extra reference images appear AFTER the blueprint image and BEFORE the motif images in the reference image sequence.`
     : '';
 
+  const motifAspectRatios = hasMotif ? getMotifAspectRatios(motifPaths) : [];
+  const motifFormatSpec = motifAspectRatios.length
+    ? ` Exact format for each motif (MUST be preserved 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.`
+    : '';
+  const replaceCanvasHint = hasMotif && blueprintImagePath
+    ? ' If the composition reference (blueprint) already shows a canvas or picture on the wall, that canvas must be REPLACED by the user\'s uploaded motif(s) – not stretched, stuffed, or distorted; display the motif in its correct aspect ratio.'
+    : '';
   const motifPromptLine = hasMotif
-    ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion. The motif images are included as the LAST ${motifPaths.length} reference image(s).`
+    ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${replaceCanvasHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
     : '';
 
   const tagSection = tagPrompts.length > 0
@@ -1095,7 +1122,7 @@ async function buildPromptsForScene(
   }
 
   const enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, enrichedPrompt);
-  const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap);
+  const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, undefined, motifAspectRatios);
   return { enrichedPrompt: enrichedPromptWithPatterns, imagePrompt };
 }
 
@@ -1227,6 +1254,7 @@ async function generateImage(
     const activeMaterials = materials.filter(m => m.status !== 'idle');
     const motifPaths = Array.isArray(motifImagePaths) ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES) : [];
     const hasMotif = motifPaths.length > 0;
+    const motifAspectRatios = hasMotif ? getMotifAspectRatios(motifPaths) : [];
 
     logger.info('scenes', 'IMAGE_GEN_START', {
       sceneId,
@@ -1280,8 +1308,14 @@ async function generateImage(
       ? `## Additional Reference Images (Person/Objects): ${extraRefImagePaths.length} extra reference image(s) have been provided by the user. These images show persons, objects, or visual references that the user may describe in their instructions above. The user can refer to them as "Extra-Referenzbild 1", "Extra-Referenzbild 2", etc. (numbered in order). Use these images to faithfully reproduce the depicted person/object/visual in the generated scene as described by the user. These extra reference images appear AFTER the blueprint image and BEFORE the motif images in the reference image sequence.`
       : '';
 
+    const motifFormatSpec = motifAspectRatios.length
+      ? ` Exact format for each motif (MUST be preserved 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.`
+      : '';
+    const replaceCanvasHint = hasMotif && blueprintImagePath
+      ? ' If the composition reference (blueprint) already shows a canvas or picture on the wall, that canvas must be REPLACED by the user\'s uploaded motif(s) – not stretched, stuffed, or distorted; display the motif in its correct aspect ratio.'
+      : '';
     const motifPromptLine = hasMotif
-      ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion. The motif images are included as the LAST ${motifPaths.length} reference image(s).`
+      ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${replaceCanvasHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
       : '';
 
     const tagSection = tagPrompts.length > 0
@@ -1338,7 +1372,7 @@ async function generateImage(
 
     const tagPromptsMap = getTagPromptsMap(db);
     const flux2ProRefIndices = fluxVersion === '2pro' ? { blueprintCount: blueprintImagePath ? 1 : 0, extraRefCount: Math.min(4, extraRefImagePaths.length), motifCount: motifPaths.length } : undefined;
-    const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, flux2ProRefIndices);
+    const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, flux2ProRefIndices, motifAspectRatios);
 
     logger.info('scenes', `Generating image for scene ${sceneId} with ${referenceImages.length} reference images, aspect=${aspectRatio}`);
     const lora = getLoraConfig(db);
@@ -1589,6 +1623,7 @@ async function generateImageWithFeedback(
     const provider = getConfiguredImageProvider(db);
 
     const motifPaths = getMotifPathsFromScene(scene);
+    const motifAspectRatios = motifPaths.length > 0 ? getMotifAspectRatios(motifPaths) : [];
     const extraRefPaths = (extraRefPathsForRequest?.length
       ? [...getExtraRefPathsFromScene(scene), ...extraRefPathsForRequest].slice(0, MAX_EXTRA_REFERENCE_IMAGES)
       : getExtraRefPathsFromScene(scene));
@@ -1690,7 +1725,7 @@ ${addendum}`;
     - ONLY apply the corrections listed above.
     - The result must look like the source image with the specific edits applied.
     - ONLY the materials and motifs from the reference images may appear. Do NOT add any new objects (brushes, palettes, colored pencils, pens, or other props) that are not in the reference images.
-    - Motif formats must NEVER be changed: preserve each motif's exact aspect ratio and proportions; no stretching, cropping, or distortion.
+    - Motif formats must NEVER be changed: preserve each motif's exact aspect ratio and proportions; no stretching, cropping, or distortion.${motifAspectRatios.length > 0 ? ` Exact motif formats (MUST preserve 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join('; ')}.` : ''}
     - NEVER add any text, writing, labels, numbers, or letters onto the image unless the user EXPLICITLY requested it in the corrections above. If no text/labels are requested, the image must contain NO visible text or writing.
     
     === OUTPUT ===

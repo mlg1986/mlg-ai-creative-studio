@@ -308,7 +308,8 @@ export function buildImageGenerationPrompt(
   aspectRatio?: string,
   promptTags: string[] = [],
   tagPromptsMap?: Record<string, string>,
-  flux2ProRefIndices?: Flux2ProRefIndices
+  flux2ProRefIndices?: Flux2ProRefIndices,
+  motifAspectRatios?: string[]
 ): string {
   const refInstructions = buildReferenceImageInstructions(materials, hasMotifImage);
   const tagMap = tagPromptsMap ?? TAG_PROMPTS;
@@ -319,7 +320,8 @@ export function buildImageGenerationPrompt(
     let idx = 1;
     const parts: string[] = [];
     if (blueprintCount > 0) {
-      parts.push(`Image ${idx} = composition blueprint`);
+      const replaceHint = motifCount > 0 ? ' If it shows a canvas, REPLACE that canvas with the user\'s motif image(s); keep motif aspect ratio.' : '';
+      parts.push(`Image ${idx} = composition blueprint${replaceHint}`);
       idx += blueprintCount;
     }
     if (extraRefCount > 0) {
@@ -329,7 +331,8 @@ export function buildImageGenerationPrompt(
     }
     if (motifCount > 0) {
       const range = motifCount === 1 ? `Image ${idx}` : `Images ${idx}-${idx + motifCount - 1}`;
-      parts.push(`${range} = motif canvases – reproduce exactly, same aspect ratio and content; do not add, duplicate, or alter`);
+      const formatHint = motifAspectRatios?.length ? ` Format (MUST preserve 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.` : '';
+      parts.push(`${range} = motif canvases – reproduce exactly, same aspect ratio and content; do not add, duplicate, or alter.${formatHint}`);
       idx += motifCount;
     }
     if (idx <= 8) parts.push(`Images ${idx}-8 = material reference images`);
@@ -338,11 +341,15 @@ export function buildImageGenerationPrompt(
 
   let motifSection = '';
   if (hasMotifImage) {
+    const formatBlock = motifAspectRatios?.length
+      ? `\n- MOTIF FORMATS (MANDATORY – 100% preserve): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = aspect ratio ${ar}`).join('; ')}. Each motif must be displayed in exactly this aspect ratio – no stretching, cropping, or distortion.`
+      : '';
     motifSection = `\n\nCANVAS MOTIF IMAGES (STRICT – NO HALLUCINATION):
 The LAST reference image(s) are the user's uploaded artwork. You MUST show these EXACT images on the canvas – not a variation, not an interpretation, not new artwork.
+- REPLACE ANY EXISTING CANVAS IN THE REFERENCE: If the composition blueprint or any reference image already shows a canvas (or picture/frame on the wall), that canvas content must be REPLACED by the user's uploaded motif image(s). Do NOT keep the original artwork that appears on the canvas in the reference – the user's motif REPLACES it. The motif is displayed as a canvas, in its correct size and aspect ratio – never stretched, stuffed, cropped, or distorted.
 - The artwork on the wall/canvas must be a faithful reproduction of those uploaded motif image(s): same subject, same colors, same composition, same details. Do NOT re-draw or re-invent.
 - ONLY these uploaded motif images may appear as canvas graphics. Do NOT add any other motifs, logos, or graphics. Do NOT generate new artwork; display the exact motif image content.
-- Preserve each motif's exact aspect ratio and proportions; do not stretch, crop, or distort. Each motif appears exactly once, identical in content to its reference image.
+- Preserve each motif's exact aspect ratio and proportions; do not stretch, crop, or distort. Each motif appears exactly once, identical in content to its reference image.${formatBlock}
 - Render each motif as the finished artwork on canvas (content = exact copy of the reference). Use paint-by-numbers texture only if the scene description explicitly requests it.
 - CRITICAL: If you cannot reproduce the motif pixel-accurately, still do not substitute a different image – keep the same subject and composition as in the reference.`;
   }
