@@ -40,6 +40,7 @@ export function initDatabase(db: Database.Database) {
       prompt_template TEXT,
       typical_use TEXT,
       is_builtin INTEGER DEFAULT 1,
+      preview_image_path TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -328,6 +329,17 @@ export function initDatabase(db: Database.Database) {
     } catch (e) {
       logger.error('db', 'Failed to create prompt_tags table', e);
     }
+  }
+
+  // Migration: add preview_image_path to scene_templates if missing
+  try {
+    const cols = db.prepare('PRAGMA table_info(scene_templates)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'preview_image_path')) {
+      db.exec('ALTER TABLE scene_templates ADD COLUMN preview_image_path TEXT');
+      logger.info('db', 'Migrated: added preview_image_path to scene_templates');
+    }
+  } catch (e) {
+    logger.error('db', 'Migration preview_image_path failed', e);
   }
 
   // Seed templates

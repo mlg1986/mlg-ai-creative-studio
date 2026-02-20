@@ -30,9 +30,12 @@ export function createTemplatesRouter(db: Database.Database) {
     const existing = db.prepare('SELECT * FROM scene_templates WHERE id = ?').get(req.params.id) as any;
     if (!existing) throw new NotFoundError('template', req.params.id);
 
+    const previewPath = req.body.preview_image_path !== undefined
+      ? (req.body.preview_image_path === '' ? null : req.body.preview_image_path)
+      : existing.preview_image_path;
     db.prepare(`
-      UPDATE scene_templates SET name=?, icon=?, description=?, prompt_template=?, typical_use=? WHERE id=?
-    `).run(req.body.name, req.body.icon, req.body.description, req.body.prompt_template, req.body.typical_use, req.params.id);
+      UPDATE scene_templates SET name=?, icon=?, description=?, prompt_template=?, typical_use=?, preview_image_path=? WHERE id=?
+    `).run(req.body.name, req.body.icon, req.body.description, req.body.prompt_template, req.body.typical_use, previewPath, req.params.id);
 
     const template = db.prepare('SELECT * FROM scene_templates WHERE id = ?').get(req.params.id);
     res.json(template);

@@ -11,10 +11,14 @@ interface Props {
 
 type MenuTarget = 'header' | string | null;
 
+const HOVER_PREVIEW_DELAY_MS = 300;
+
 export function TemplatePicker({ templates, selected, onSelect, onTemplatesChange }: Props) {
   const [menuOpen, setMenuOpen] = useState<MenuTarget>(null);
   const [modalTemplate, setModalTemplate] = useState<SceneTemplate | null>(null);
   const [modalMode, setModalMode] = useState<'create' | 'view' | 'edit'>('view');
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -24,6 +28,10 @@ export function TemplatePicker({ templates, selected, onSelect, onTemplatesChang
     }
     document.addEventListener('click', handleClickOutside);
     return () => document.removeEventListener('click', handleClickOutside);
+  }, []);
+
+  useEffect(() => () => {
+    if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
   }, []);
 
   const openView = (tpl: SceneTemplate) => {
@@ -85,7 +93,32 @@ export function TemplatePicker({ templates, selected, onSelect, onTemplatesChang
                 ? 'border-purple-500 bg-purple-500/10'
                 : 'border-white/10 bg-gray-900/50 hover:border-purple-400/30'
             }`}
+            onMouseEnter={() => {
+              if (!tpl.preview_image_path) return;
+              if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+              hoverTimeoutRef.current = setTimeout(() => setHoveredId(tpl.id), HOVER_PREVIEW_DELAY_MS);
+            }}
+            onMouseLeave={() => {
+              if (hoverTimeoutRef.current) {
+                clearTimeout(hoverTimeoutRef.current);
+                hoverTimeoutRef.current = null;
+              }
+              setHoveredId(null);
+            }}
           >
+            {tpl.preview_image_path && hoveredId === tpl.id && (
+              <div
+                className="absolute left-0 bottom-full mb-1 z-30 rounded-lg overflow-hidden border border-white/20 shadow-xl bg-gray-900"
+                style={{ maxWidth: 280, maxHeight: 200 }}
+              >
+                <img
+                  src={tpl.preview_image_path}
+                  alt=""
+                  className="w-full h-full object-contain"
+                  style={{ maxWidth: 280, maxHeight: 200 }}
+                />
+              </div>
+            )}
             <button
               type="button"
               onClick={() => onSelect(selected === tpl.id ? null : tpl.id)}

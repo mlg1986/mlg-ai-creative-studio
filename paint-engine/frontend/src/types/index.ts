@@ -34,6 +34,8 @@ export interface SceneTemplate {
   prompt_template: string;
   typical_use: string;
   is_builtin: number;
+  /** Optional preview image path (e.g. from a generated scene); shown on hover in template picker. */
+  preview_image_path?: string | null;
 }
 
 export interface PromptTag {

@@ -60,6 +60,16 @@ function getExtraRefPathsFromScene(scene: any): string[] {
   return [];
 }
 
+/** Set template preview image from a generated scene if the template has none yet. */
+function setTemplatePreviewIfMissing(db: Database.Database, templateId: string | null, imagePath: string): void {
+  if (!templateId) return;
+  const row = db.prepare('SELECT preview_image_path FROM scene_templates WHERE id = ?').get(templateId) as { preview_image_path: string | null } | undefined;
+  if (row && row.preview_image_path == null) {
+    db.prepare('UPDATE scene_templates SET preview_image_path = ? WHERE id = ?').run(imagePath, templateId);
+    logger.info('scenes', `Set template ${templateId} preview_image_path to ${imagePath}`);
+  }
+}
+
 /** Read image dimensions from file so refinement keeps exact aspect ratio (e.g. 16:9 not 9:16). */
 function getImageDimensionsFromFile(filePath: string): { width: number; height: number } | null {
   try {
@@ -1207,6 +1217,8 @@ RULES:
       .run(imagePath, variantSceneId);
     db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ? WHERE id = ?")
       .run(result.cost || 0.04, jobId);
+    const variantSceneRow = db.prepare('SELECT template_id FROM scenes WHERE id = ?').get(variantSceneId) as { template_id: string | null } | undefined;
+    setTemplatePreviewIfMissing(db, variantSceneRow?.template_id ?? null, imagePath);
 
     logger.info('scenes', `Format variant generated for scene ${variantSceneId}`);
   } catch (error: any) {
@@ -1571,6 +1583,7 @@ async function generateImage(
       .run(imagePath, sceneId);
     db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ?, error_message = ?, generation_path = ? WHERE id = ?")
       .run(result.cost || 0.04, fallbackNote, generationPath, jobId);
+    setTemplatePreviewIfMissing(db, template?.id ?? null, imagePath);
 
     logger.info('scenes', 'IMAGE_GEN_DONE', { sceneId, jobId, generationPath, actualProvider: result.provider });
 
@@ -1765,6 +1778,7 @@ ${addendum}`;
       .run(imagePath, sceneId);
     db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ? WHERE id = ?")
       .run(result.cost || 0.04, jobId);
+    setTemplatePreviewIfMissing(db, scene.template_id ?? null, imagePath);
 
     logger.info('scenes', `Image generated with feedback for scene ${sceneId}`);
   } catch (error: any) {
