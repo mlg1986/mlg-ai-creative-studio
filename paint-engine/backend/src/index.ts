@@ -10,6 +10,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { createMaterialsRouter } from './routes/materials.js';
 import { createTemplatesRouter } from './routes/templates.js';
+import { createPromptTagsRouter } from './routes/promptTags.js';
 import { createScenesRouter, cleanupStaleScenes } from './routes/scenes.js';
 import { createVideoRouter } from './routes/video.js';
 import { createProjectsRouter } from './routes/projects.js';
@@ -52,6 +53,7 @@ cleanupStaleScenes(db);
 // Routes
 app.use('/api/materials', createMaterialsRouter(db));
 app.use('/api/templates', createTemplatesRouter(db));
+app.use('/api/prompt-tags', createPromptTagsRouter(db));
 app.use('/api/scenes', createScenesRouter(db));
 app.use('/api/scenes', createVideoRouter(db));
 app.use('/api/projects', createProjectsRouter(db));

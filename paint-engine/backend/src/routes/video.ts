@@ -8,6 +8,7 @@ import { validateVideoGenerate } from '../middleware/validate.js';
 import { NotFoundError, ValidationError } from '../types/errors.js';
 import { logger } from '../services/logger.js';
 import { getVideoProvider } from '../services/providerFactory.js';
+import { getPromptEnricherForDb } from '../services/promptEnricher.js';
 import { buildSceneMaterialContext } from '../services/promptBuilder.js';
 
 const rendersDir = path.join(process.cwd(), '..', 'public', 'renders');
@@ -118,8 +119,9 @@ async function generateVideo(
       : '';
     const combinedPrompt = [stylePrompt, userPrompt, materialFidelityInstruction].filter(Boolean).join(' ');
 
-    // Optimize prompt via Scene Intelligence
-    const optimizedPrompt = await provider.enrichPrompt(
+    // Optimize prompt via Scene Intelligence (Gemini oder OpenAI)
+    const enricher = getPromptEnricherForDb(db);
+    const optimizedPrompt = await enricher.enrichPrompt(
       'You are a video prompt optimizer for Veo 3.1. Convert the user description into an optimized video generation prompt. Focus on camera movement, lighting changes, and scene dynamics. CRITICAL: Preserve all material properties, labels, and proportions from the source image.',
       combinedPrompt
     );

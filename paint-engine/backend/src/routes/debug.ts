@@ -10,11 +10,24 @@ export function createDebugRouter(db: Database.Database) {
   const router = Router();
 
   router.get('/status', asyncHandler(async (_req, res) => {
+    const lastImageJob = db.prepare(`
+      SELECT id, scene_id, job_type, status, generation_path, error_message, started_at, completed_at
+      FROM render_jobs WHERE job_type IN ('image','image-refinement') ORDER BY started_at DESC LIMIT 1
+    `).get() as any;
     const stats = {
       materials: (db.prepare('SELECT COUNT(*) as count FROM materials').get() as any).count,
       scenes: (db.prepare('SELECT COUNT(*) as count FROM scenes').get() as any).count,
       activeJobs: db.prepare("SELECT * FROM render_jobs WHERE status IN ('pending','processing')").all(),
       lastErrors: db.prepare("SELECT * FROM render_jobs WHERE status = 'failed' ORDER BY completed_at DESC LIMIT 5").all(),
+      lastImageGeneration: lastImageJob ? {
+        jobId: lastImageJob.id,
+        sceneId: lastImageJob.scene_id,
+        status: lastImageJob.status,
+        generationPath: lastImageJob.generation_path ?? null,
+        errorMessage: lastImageJob.error_message ?? null,
+        startedAt: lastImageJob.started_at,
+        completedAt: lastImageJob.completed_at,
+      } : null,
       provider: {
         image: (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini',
         video: (db.prepare("SELECT value FROM settings WHERE key = 'video_provider'").get() as any)?.value || 'veo',

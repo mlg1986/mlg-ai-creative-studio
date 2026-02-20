@@ -36,6 +36,15 @@ export interface SceneTemplate {
   is_builtin: number;
 }
 
+export interface PromptTag {
+  id: string;
+  category_id: string;
+  label: string;
+  prompt: string;
+  order_index: number;
+  is_builtin: number;
+}
+
 export interface VerificationIssue {
   materialId?: string;
   materialName?: string;

@@ -14,11 +14,13 @@ import { VideoPanel } from './components/Video/VideoPanel';
 import { SceneGallery } from './components/Project/SceneGallery';
 import { ApiKeyModal } from './components/Settings/ApiKeyModal';
 import { PromptTags } from './components/Scene/PromptTags';
+import { PromptPreviewModal, type PromptPreviewData } from './components/Scene/PromptPreviewModal';
 import { useMaterials } from './hooks/useMaterials';
 import { useTemplates } from './hooks/useTemplates';
 import { useScene } from './hooks/useScene';
 import { usePresets } from './hooks/usePresets';
 import { api } from './services/api';
+import type { PromptTag } from './types';
 
 export default function App() {
   const { materials, engagedMaterials, loading, refresh, toggleStatus, deleteMaterial } = useMaterials();
@@ -41,7 +43,38 @@ export default function App() {
   const [showVideoPanel, setShowVideoPanel] = useState(false);
   const [sceneMaterialIds, setSceneMaterialIds] = useState<string[]>([]);
   const [savingScene, setSavingScene] = useState(false);
+  const [showPromptPreview, setShowPromptPreview] = useState(false);
+  const [promptPreviewData, setPromptPreviewData] = useState<PromptPreviewData | null>(null);
+  const [promptPreviewLoading, setPromptPreviewLoading] = useState(false);
+  const [promptPreviewShowGenerate, setPromptPreviewShowGenerate] = useState(false);
+  const [pendingGeneratePayload, setPendingGeneratePayload] = useState<Parameters<typeof generateImage>[0] | null>(null);
+  const [promptTags, setPromptTags] = useState<PromptTag[]>([]);
   const lastSyncedSceneIdRef = useRef<string | null>(null);
+  const [imageProvider, setImageProviderState] = useState<string>('replicate');
+  const [replicateFluxVersion, setReplicateFluxVersionState] = useState<'1' | '2pro' | 'grok'>('2pro');
+
+  useEffect(() => {
+    api.settings.getProviders().then(p => {
+      setImageProviderState(p.imageProvider || 'replicate');
+      setReplicateFluxVersionState((p.replicateFluxVersion === 'grok' || p.replicateFluxVersion === '2pro' || p.replicateFluxVersion === '1') ? p.replicateFluxVersion : '2pro');
+    }).catch(() => {});
+  }, []);
+
+  const setImageModel = (provider: string, fluxVersion?: '1' | '2pro' | 'grok') => {
+    const newProvider = provider || 'replicate';
+    const newFlux = fluxVersion ?? (newProvider === 'replicate' ? replicateFluxVersion : '2pro');
+    setImageProviderState(newProvider);
+    if (newProvider === 'replicate') setReplicateFluxVersionState(newFlux);
+    api.settings.setImageProvider(newProvider, newProvider === 'replicate' ? newFlux : undefined).catch(() => {});
+  };
+
+  const refreshPromptTags = () => {
+    api.promptTags.getAll().then(setPromptTags).catch(() => setPromptTags([]));
+  };
+
+  useEffect(() => {
+    refreshPromptTags();
+  }, []);
 
   // Set default export preset to Instagram Story (9:16) when presets are loaded
   useEffect(() => {
@@ -158,7 +191,13 @@ export default function App() {
       return;
     }
 
-    const payload = {
+    const payload = buildGeneratePayload();
+    console.log('[App] Generating image:', payload);
+    generateImage(payload);
+  };
+
+  function buildGeneratePayload() {
+    return {
       projectId: 'default',
       templateId: selectedTemplate || undefined,
       sceneDescription: sceneDescription || undefined,
@@ -170,8 +209,31 @@ export default function App() {
       motifImagePaths: motifPaths.length ? motifPaths : undefined,
       extraReferencePaths: extraReferencePaths.length ? extraReferencePaths : undefined,
     };
-    console.log('[App] Generating image:', payload);
-    generateImage(payload);
+  }
+
+  const handlePreviewPrompt = async (showGenerateButton: boolean) => {
+    if (!exportPreset) return;
+    const payload = buildGeneratePayload();
+    setPromptPreviewData(null);
+    setPromptPreviewShowGenerate(showGenerateButton);
+    setPendingGeneratePayload(showGenerateButton ? payload : null);
+    setShowPromptPreview(true);
+    setPromptPreviewLoading(true);
+    try {
+      const data = await api.scenes.previewPrompt(payload);
+      setPromptPreviewData(data);
+    } catch {
+      setShowPromptPreview(false);
+    } finally {
+      setPromptPreviewLoading(false);
+    }
+  };
+
+  const handleConfirmGenerate = () => {
+    if (pendingGeneratePayload) {
+      generateImage(pendingGeneratePayload);
+      setPendingGeneratePayload(null);
+    }
   };
 
   const handleDisengage = (id: string) => {
@@ -246,6 +308,28 @@ export default function App() {
             </div>
           )}
 
+          {/* Bildmodell – direkt in der Sidebar wählbar, Standard FLUX 2 Pro */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-medium text-gray-400 uppercase tracking-wider">Bildmodell</label>
+            <select
+              value={imageProvider === 'replicate' ? `replicate-${replicateFluxVersion}` : imageProvider}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'gemini') setImageModel('gemini');
+                else if (v === 'replicate-2pro') setImageModel('replicate', '2pro');
+                else if (v === 'replicate-1') setImageModel('replicate', '1');
+                else if (v === 'replicate-grok') setImageModel('replicate', 'grok');
+                else setImageModel('replicate', '2pro');
+              }}
+              className="w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+            >
+              <option value="replicate-2pro">FLUX 2 Pro (Standard)</option>
+              <option value="replicate-1">FLUX 1.1 (LoRA)</option>
+              <option value="replicate-grok">Grok (xAI)</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+
           {/* Template Picker */}
           <TemplatePicker
             templates={templates}
@@ -265,7 +349,20 @@ export default function App() {
           <PromptTags
             selectedTags={selectedTags}
             onToggleTag={toggleTag}
+            tags={promptTags}
+            onTagsChange={refreshPromptTags}
+            onPreviewPrompt={!isEditMode && exportPreset ? () => handlePreviewPrompt(false) : undefined}
           />
+          {!isEditMode && (
+            <button
+              type="button"
+              onClick={() => handlePreviewPrompt(false)}
+              disabled={!exportPreset || promptPreviewLoading}
+              className="w-full py-2 rounded-lg border border-white/10 text-xs font-medium text-gray-300 hover:bg-white/5 disabled:opacity-50 transition-colors"
+            >
+              {promptPreviewLoading ? 'Prompt wird generiert…' : 'Prompt generieren'}
+            </button>
+          )}
 
           {/* Format Selector */}
           <FormatSelector
@@ -330,8 +427,8 @@ export default function App() {
             ) : (
               <>
                 <button
-                  onClick={handleGenerate}
-                  disabled={generating || !exportPreset}
+                  onClick={() => handlePreviewPrompt(true)}
+                  disabled={generating || !exportPreset || promptPreviewLoading}
                   className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 to-purple-700 text-sm font-bold uppercase tracking-wider disabled:opacity-40 hover:from-purple-700 hover:to-purple-800 transition-all"
                 >
                   {generating ? 'GENERATING...' : !exportPreset ? 'LOADING...' : 'GENERATE IMAGE'}
@@ -391,7 +488,27 @@ export default function App() {
       </div>
 
       {/* Settings Modal */}
-      <ApiKeyModal open={showSettings} onClose={() => setShowSettings(false)} />
+      <ApiKeyModal open={showSettings} onClose={() => {
+        setShowSettings(false);
+        api.settings.getProviders().then(p => {
+          setImageProviderState(p.imageProvider || 'replicate');
+          setReplicateFluxVersionState((p.replicateFluxVersion === 'grok' || p.replicateFluxVersion === '2pro' || p.replicateFluxVersion === '1') ? p.replicateFluxVersion : '2pro');
+        }).catch(() => {});
+      }} />
+
+      {/* Prompt Preview Modal */}
+      <PromptPreviewModal
+        open={showPromptPreview}
+        onClose={() => {
+          setShowPromptPreview(false);
+          setPromptPreviewData(null);
+          setPendingGeneratePayload(null);
+        }}
+        data={promptPreviewData}
+        loading={promptPreviewLoading}
+        showGenerateButton={promptPreviewShowGenerate}
+        onGenerateImage={handleConfirmGenerate}
+      />
     </div>
   );
 }

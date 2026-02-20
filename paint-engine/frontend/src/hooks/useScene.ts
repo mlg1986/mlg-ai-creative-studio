@@ -2,11 +2,26 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Scene } from '../types';
 import { api } from '../services/api';
 
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_MS = 15 * 60 * 1000; // 15 min – stop polling so UI doesn't loop forever if backend never finishes
+
 export function useScene() {
   const [currentScene, setCurrentScene] = useState<Scene | null>(null);
   const [generating, setGenerating] = useState(false);
   const [generatedFromNew, setGeneratedFromNew] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Clear any existing poll when starting a new one, and on unmount
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return stopPolling;
+  }, [stopPolling]);
 
   // When no scene is selected, we're not in "edit from gallery" mode
   useEffect(() => {
@@ -36,23 +51,29 @@ export function useScene() {
       setGeneratedFromNew(true);
       setCurrentScene({ id: result.id, image_status: 'generating' } as Scene);
 
-      // Start polling
+      stopPolling();
+      const pollStart = Date.now();
       pollRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > MAX_POLL_MS) {
+          stopPolling();
+          setGenerating(false);
+          return;
+        }
         try {
           const scene = await api.scenes.get(result.id);
           setCurrentScene(scene);
           if (scene.image_status === 'done' || scene.image_status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
+            stopPolling();
             setGenerating(false);
           }
         } catch {
           // Keep polling
         }
-      }, 3000);
+      }, POLL_INTERVAL_MS);
     } catch {
       setGenerating(false);
     }
-  }, []);
+  }, [stopPolling]);
 
   const regenerate = useCallback(async () => {
     if (!currentScene) return;
@@ -61,20 +82,28 @@ export function useScene() {
       await api.scenes.regenerate(currentScene.id);
       setCurrentScene(prev => prev ? { ...prev, image_status: 'generating' } : null);
 
+      stopPolling();
+      const pollStart = Date.now();
+      const sceneId = currentScene.id;
       pollRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > MAX_POLL_MS) {
+          stopPolling();
+          setGenerating(false);
+          return;
+        }
         try {
-          const scene = await api.scenes.get(currentScene.id);
+          const scene = await api.scenes.get(sceneId);
           setCurrentScene(scene);
           if (scene.image_status === 'done' || scene.image_status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
+            stopPolling();
             setGenerating(false);
           }
         } catch { /* keep polling */ }
-      }, 3000);
+      }, POLL_INTERVAL_MS);
     } catch {
       setGenerating(false);
     }
-  }, [currentScene]);
+  }, [currentScene, stopPolling]);
 
   const generateVideo = useCallback(async (data: {
     videoStyle: string;
@@ -105,20 +134,28 @@ export function useScene() {
       const result = await api.scenes.createVariant(sceneId, exportPreset);
       setCurrentScene({ id: result.id, image_status: 'generating' } as Scene);
 
+      stopPolling();
+      const pollStart = Date.now();
+      const variantSceneId = result.id;
       pollRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > MAX_POLL_MS) {
+          stopPolling();
+          setGenerating(false);
+          return;
+        }
         try {
-          const scene = await api.scenes.get(result.id);
+          const scene = await api.scenes.get(variantSceneId);
           setCurrentScene(scene);
           if (scene.image_status === 'done' || scene.image_status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
+            stopPolling();
             setGenerating(false);
           }
         } catch { /* keep polling */ }
-      }, 3000);
+      }, POLL_INTERVAL_MS);
     } catch {
       setGenerating(false);
     }
-  }, []);
+  }, [stopPolling]);
 
   const prepareRefinement = useCallback(async (materialIds?: string[], hasExtensionImage?: boolean) => {
     if (!currentScene) return null;
@@ -138,20 +175,28 @@ export function useScene() {
       await api.scenes.regenerateWithFeedback(currentScene.id, materialIds, promptAddendum, extraReferencePaths);
       setCurrentScene(prev => prev ? { ...prev, image_status: 'generating' } : null);
 
+      stopPolling();
+      const pollStart = Date.now();
+      const sceneId = currentScene.id;
       pollRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > MAX_POLL_MS) {
+          stopPolling();
+          setGenerating(false);
+          return;
+        }
         try {
-          const scene = await api.scenes.get(currentScene.id);
+          const scene = await api.scenes.get(sceneId);
           setCurrentScene(scene);
           if (scene.image_status === 'done' || scene.image_status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
+            stopPolling();
             setGenerating(false);
           }
         } catch { /* keep polling */ }
-      }, 3000);
+      }, POLL_INTERVAL_MS);
     } catch {
       setGenerating(false);
     }
-  }, [currentScene]);
+  }, [currentScene, stopPolling]);
 
   const visionCorrection = useCallback(async () => {
     if (!currentScene) return;
@@ -160,20 +205,28 @@ export function useScene() {
       await api.scenes.visionCorrection(currentScene.id);
       setCurrentScene(prev => prev ? { ...prev, image_status: 'generating' } : null);
 
+      stopPolling();
+      const pollStart = Date.now();
+      const sceneId = currentScene.id;
       pollRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > MAX_POLL_MS) {
+          stopPolling();
+          setGenerating(false);
+          return;
+        }
         try {
-          const scene = await api.scenes.get(currentScene.id);
+          const scene = await api.scenes.get(sceneId);
           setCurrentScene(scene);
           if (scene.image_status === 'done' || scene.image_status === 'failed') {
-            if (pollRef.current) clearInterval(pollRef.current);
+            stopPolling();
             setGenerating(false);
           }
         } catch { /* keep polling */ }
-      }, 3000);
+      }, POLL_INTERVAL_MS);
     } catch {
       setGenerating(false);
     }
-  }, [currentScene]);
+  }, [currentScene, stopPolling]);
 
   return {
     currentScene,
