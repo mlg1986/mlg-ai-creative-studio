@@ -1,4 +1,4 @@
-import { Material, Scene, SceneTemplate, Project, Toast, ExportPreset } from '../types';
+import { Material, Scene, SceneTemplate, PromptTag, Project, Toast, ExportPreset } from '../types';
 
 let toastListeners: ((toast: Toast) => void)[] = [];
 
@@ -21,9 +21,10 @@ interface ApiError {
 function getUserMessage(error: ApiError): string {
   const messages: Record<string, string> = {
     'AI_RATE_LIMIT': 'API-Limit erreicht. Bitte warte einen Moment und versuche es erneut.',
+    'AI_SERVICE_UNAVAILABLE': 'Der KI-Dienst ist gerade stark ausgelastet. Bitte in ein paar Minuten erneut versuchen.',
     'AI_SAFETY_BLOCK': 'Die KI hat die Anfrage aus Sicherheitsgründen abgelehnt. Passe die Beschreibung an.',
     'AI_TIMEOUT': 'Die KI-Generierung hat zu lange gedauert. Bitte versuche es erneut.',
-    'AI_PROVIDER_ERROR': 'Fehler bei der KI-Generierung. Prüfe API-Key und versuche es erneut.',
+    'AI_PROVIDER_ERROR': error.message?.trim() || 'Fehler bei der KI-Generierung. Prüfe API-Key und versuche es erneut.',
     'MATERIAL_NOT_FOUND': 'Material nicht gefunden.',
     'VALIDATION_ERROR': error.message,
     'FILE_ERROR': 'Fehler beim Datei-Upload. Prüfe Format und Größe.',
@@ -109,10 +110,34 @@ export const api = {
     }),
     delete: (id: string) => apiFetch<{ success: boolean }>(`/templates/${id}`, { method: 'DELETE' }),
   },
+  promptTags: {
+    getAll: () => apiFetch<PromptTag[]>('/prompt-tags'),
+    create: (data: { category_id: string; label: string; prompt: string; order_index?: number }) =>
+      apiFetch<PromptTag>('/prompt-tags', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: { category_id?: string; label?: string; prompt?: string; order_index?: number }) =>
+      apiFetch<PromptTag>(`/prompt-tags/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string) => apiFetch<{ success: boolean }>(`/prompt-tags/${id}`, { method: 'DELETE' }),
+  },
   scenes: {
     getAll: (projectId?: string) => apiFetch<Scene[]>(`/scenes${projectId ? `?projectId=${projectId}` : ''}`),
     get: (id: string) => apiFetch<Scene>(`/scenes/${id}`),
     create: (data: any) => apiFetch<{ id: string; image_status: string }>('/scenes', {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+    previewPrompt: (data: {
+      projectId?: string;
+      templateId?: string;
+      sceneDescription?: string;
+      materialIds?: string[];
+      format?: string;
+      exportPreset?: string;
+      promptTags?: string[];
+      blueprintImagePath?: string;
+      motifImagePath?: string;
+      motifImagePaths?: string[];
+      extraReferencePaths?: string[];
+      motifDisplayMode?: 'auto' | 'template' | 'stretched';
+    }) => apiFetch<{ enrichedPrompt: string; imagePrompt: string }>('/scenes/preview-prompt', {
       method: 'POST', body: JSON.stringify(data),
     }),
     update: (id: string, data: {
@@ -128,6 +153,7 @@ export const api = {
       motif_image_path?: string | null;
       motif_image_paths?: string[] | null;
       extra_reference_paths?: string[] | null;
+      motif_display_mode?: 'auto' | 'template' | 'stretched' | null;
       materialIds?: string[];
     }) => apiFetch<Scene>(`/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: string) => apiFetch<{ success: boolean }>(`/scenes/${id}`, { method: 'DELETE' }),
@@ -151,7 +177,20 @@ export const api = {
     generateVideo: (sceneId: string, data: any) => apiFetch<any>(`/scenes/${sceneId}/video`, {
       method: 'POST', body: JSON.stringify(data),
     }),
-    videoStatus: (sceneId: string) => apiFetch<any>(`/scenes/${sceneId}/video/status`),
+    /** Generate video prompt only (no job). Returns { videoPrompt }. */
+    previewVideoPrompt: (sceneId: string, data: { videoStyle?: string; videoPrompt?: string }) =>
+      apiFetch<{ videoPrompt: string }>(`/scenes/${sceneId}/video/preview-prompt`, {
+        method: 'POST',
+        body: JSON.stringify({ videoStyle: data.videoStyle || 'cinematic', videoPrompt: data.videoPrompt || null }),
+      }),
+    videoStatus: (sceneId: string) => apiFetch<{
+      video_status: string;
+      video_path?: string;
+      video_style?: string;
+      video_duration?: number;
+      video_prompt_generated?: string;
+      job: any;
+    }>(`/scenes/${sceneId}/video/status`),
     createVariant: (sceneId: string, exportPreset: string) => apiFetch<{ id: string; image_status: string }>(`/scenes/${sceneId}/variant`, {
       method: 'POST', body: JSON.stringify({ exportPreset }),
     }),
@@ -185,5 +224,39 @@ export const api = {
     setApiKey: (apiKey: string) => apiFetch<{ success: boolean }>('/settings/api-key', {
       method: 'PUT', body: JSON.stringify({ apiKey }),
     }),
+    getReplicateKeyStatus: () => apiFetch<{ hasApiKey: boolean; source: string }>('/settings/replicate-api-key'),
+    setReplicateKey: (apiKey: string) => apiFetch<{ success: boolean }>('/settings/replicate-api-key', {
+      method: 'PUT', body: JSON.stringify({ apiKey }),
+    }),
+    getOpenAIKeyStatus: () => apiFetch<{ hasApiKey: boolean; source: string }>('/settings/openai-api-key'),
+    setOpenAIKey: (apiKey: string) => apiFetch<{ success: boolean }>('/settings/openai-api-key', {
+      method: 'PUT', body: JSON.stringify({ apiKey }),
+    }),
+    getXaiKeyStatus: () => apiFetch<{ hasApiKey: boolean; source: string }>('/settings/xai-api-key'),
+    setXaiKey: (apiKey: string) => apiFetch<{ success: boolean }>('/settings/xai-api-key', {
+      method: 'PUT', body: JSON.stringify({ apiKey }),
+    }),
+    getProviders: () => apiFetch<{
+      imageProvider: string;
+      videoProvider: string;
+      replicateFluxVersion?: string;
+      availableImageProviders: string[];
+      availableVideoProviders: { id: string; label: string; costPerSecond: number }[];
+    }>('/settings/providers'),
+    setImageProvider: (provider: string, replicateFluxVersion?: string) => apiFetch<{ success: boolean }>('/settings/providers', {
+      method: 'PUT',
+      body: JSON.stringify(replicateFluxVersion !== undefined ? { imageProvider: provider, replicateFluxVersion } : { imageProvider: provider }),
+    }),
+    setVideoProvider: (provider: string) => apiFetch<{ success: boolean }>('/settings/providers', {
+      method: 'PUT',
+      body: JSON.stringify({ videoProvider: provider }),
+    }),
+    getLoraConfig: () => apiFetch<{ loraUrl: string; loraTriggerWord: string; loraScale: number }>('/settings/lora'),
+    setLoraConfig: (config: { loraUrl?: string; loraTriggerWord?: string; loraScale?: number }) =>
+      apiFetch<{ success: boolean }>('/settings/lora', {
+        method: 'PUT', body: JSON.stringify(config),
+      }),
+    /** Test that Gemini and/or OpenAI keys for prompt generation are valid and reachable. */
+    testPromptKeys: () => apiFetch<{ gemini?: { ok: boolean; error?: string }; openai?: { ok: boolean; error?: string } }>('/settings/test-prompt-keys', { method: 'POST' }),
   },
 };

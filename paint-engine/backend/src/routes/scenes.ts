@@ -6,11 +6,14 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { validateSceneCreate } from '../middleware/validate.js';
-import { NotFoundError, ValidationError } from '../types/errors.js';
+import { AIProviderError, NotFoundError, ValidationError, isGeminiPolicyBlockError, getErrorMessage } from '../types/errors.js';
 import { logger } from '../services/logger.js';
 import { getImageProvider } from '../services/providerFactory.js';
+import { getPromptEnricher } from '../services/promptEnricher.js';
 import { verificationService } from '../services/verificationService.js';
 import { patternMemory } from '../services/patternMemory.js';
+import { composeMotifsOntoBackground } from '../services/compositingService.js';
+import { detectMotifDisplayModeFromPaths } from '../services/motifClassifier.js';
 import {
   buildSceneMaterialContext,
   buildMaterialRestrictionPrompt,
@@ -20,13 +23,23 @@ import {
   buildImageGenerationPrompt,
   EXPORT_PRESET_TO_ASPECT_RATIO,
   widthHeightToAspectRatio,
-  TAG_PROMPTS,
 } from '../services/promptBuilder.js';
 
 /** Gemini 3 Pro Image: max 14 reference images per request (see ai.google.dev/gemini-api/docs/image-generation). */
 const MAX_REFERENCE_IMAGES = 14;
+/** FLUX 2 Pro on Replicate: max 8 input_images. */
+const FLUX2_MAX_REFERENCE_IMAGES = 8;
+/** Grok on Replicate: max reference images (Replicate schema may support fewer; prompt-only if no image inputs). */
+const GROK_MAX_REFERENCE_IMAGES = 10;
 /** Max motif files accepted in one upload request; total used = remaining slots after material refs + blueprint. */
 const MAX_MOTIF_UPLOAD = 14;
+
+function getTagPromptsMap(db: Database.Database): Record<string, string> {
+  const rows = db.prepare('SELECT id, prompt FROM prompt_tags').all() as { id: string; prompt: string }[];
+  const map: Record<string, string> = {};
+  for (const row of rows) map[row.id] = row.prompt;
+  return map;
+}
 
 function getMotifPathsFromScene(scene: any): string[] {
   if (scene.motif_image_paths) {
@@ -46,6 +59,16 @@ function getExtraRefPathsFromScene(scene: any): string[] {
     } catch { return []; }
   }
   return [];
+}
+
+/** Set template preview image from a generated scene if the template has none yet. */
+function setTemplatePreviewIfMissing(db: Database.Database, templateId: string | null, imagePath: string): void {
+  if (!templateId) return;
+  const row = db.prepare('SELECT preview_image_path FROM scene_templates WHERE id = ?').get(templateId) as { preview_image_path: string | null } | undefined;
+  if (row && row.preview_image_path == null) {
+    db.prepare('UPDATE scene_templates SET preview_image_path = ? WHERE id = ?').run(imagePath, templateId);
+    logger.info('scenes', `Set template ${templateId} preview_image_path to ${imagePath}`);
+  }
 }
 
 /** Read image dimensions from file so refinement keeps exact aspect ratio (e.g. 16:9 not 9:16). */
@@ -78,6 +101,81 @@ function getImageDimensionsFromFile(filePath: string): { width: number; height: 
   return null;
 }
 
+/** Resolve motif image paths (relative, e.g. /uploads/…) to full paths. */
+function resolveMotifFullPath(relPath: string): string {
+  return path.join(process.cwd(), '..', 'public', relPath.startsWith('/') ? relPath.slice(1) : relPath);
+}
+
+/**
+ * Read aspect ratio of each motif image from disk. Used so prompt generation can state exact formats.
+ * Returns one aspect-ratio string per motif (e.g. ['16:9', '1:1']); unknown/unreadable → '1:1' fallback.
+ */
+function getMotifAspectRatios(motifPaths: string[]): string[] {
+  const out: string[] = [];
+  for (const relPath of motifPaths) {
+    const fullPath = resolveMotifFullPath(relPath);
+    const dims = getImageDimensionsFromFile(fullPath);
+    const ar = dims ? widthHeightToAspectRatio(dims.width, dims.height) : '1:1';
+    out.push(ar);
+  }
+  return out;
+}
+
+function getImageProviderKeys(db: Database.Database): { geminiApiKey: string; replicateApiKey: string; openaiApiKey: string; imageProviderName: string } {
+  const geminiApiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
+    || process.env.GEMINI_API_KEY
+    || '';
+  const replicateApiKey = (db.prepare("SELECT value FROM settings WHERE key = 'replicate_api_key'").get() as any)?.value
+    || process.env.REPLICATE_API_TOKEN
+    || '';
+  const openaiApiKey = (db.prepare("SELECT value FROM settings WHERE key = 'openai_api_key'").get() as any)?.value
+    || process.env.OPENAI_API_KEY
+    || '';
+  const imageProviderName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
+  return { geminiApiKey, replicateApiKey, openaiApiKey, imageProviderName };
+}
+
+function getConfiguredImageProvider(db: Database.Database): ReturnType<typeof getImageProvider> {
+  const { geminiApiKey, replicateApiKey, openaiApiKey, imageProviderName } = getImageProviderKeys(db);
+  return getImageProvider(imageProviderName, geminiApiKey, replicateApiKey);
+}
+
+/** Prompt-Generierung (Scene Intelligence): nutzt Gemini oder OpenAI, je nach gesetztem API-Key. */
+function getScenePromptEnricher(db: Database.Database) {
+  const keys = getImageProviderKeys(db);
+  return getPromptEnricher({ geminiApiKey: keys.geminiApiKey, openaiApiKey: keys.openaiApiKey });
+}
+
+function getLoraConfig(db: Database.Database): { loraUrl?: string; loraTriggerWord?: string; loraScale?: number } {
+  const url = (db.prepare("SELECT value FROM settings WHERE key = 'replicate_lora_url'").get() as any)?.value;
+  const trigger = (db.prepare("SELECT value FROM settings WHERE key = 'replicate_lora_trigger'").get() as any)?.value;
+  const scale = (db.prepare("SELECT value FROM settings WHERE key = 'replicate_lora_scale'").get() as any)?.value;
+  return {
+    loraUrl: url || undefined,
+    loraTriggerWord: trigger || undefined,
+    loraScale: scale != null && scale !== '' ? parseFloat(String(scale)) : undefined,
+  };
+}
+
+function getReplicateFluxVersion(db: Database.Database): '1' | '2pro' | 'grok' {
+  const val = (db.prepare("SELECT value FROM settings WHERE key = 'replicate_flux_version'").get() as any)?.value;
+  if (val === 'grok' || val === '2pro' || val === '1') return val;
+  return '2pro';
+}
+
+function buildSceneOnlyFallbackPrompt(prompt: string, motifCount: number): string {
+  if (motifCount <= 0) return prompt;
+  const areaHint = motifCount === 1
+    ? 'Leave one clear empty rectangular area on the wall for a single canvas; no artwork or graphics inside it.'
+    : `Leave ${motifCount} clear empty rectangular areas on the wall, evenly spaced (e.g. in a row), for canvases. Do not draw any artwork, logos, or graphics inside these areas – they will be filled later.`;
+  return `${prompt}
+
+FALLBACK MODE (STRICT):
+- Do NOT render any motif content, logos, characters, or artwork graphics in the generated scene.
+- ${areaHint}
+- Use consistent lighting and soft shadows so the empty areas look like real canvas positions on the wall. The result will be composited with user artwork for a coherent product photo.`;
+}
+
 const rendersDir = path.join(process.cwd(), '..', 'public', 'renders');
 const uploadsDir = path.join(process.cwd(), '..', 'public', 'uploads');
 
@@ -106,6 +204,14 @@ const extraRefStorage = multer.diskStorage({
 const uploadExtraRef = multer({ storage: extraRefStorage, limits: { fileSize: 50 * 1024 * 1024 } });
 const MAX_EXTRA_REFERENCE_IMAGES = 8;
 
+function getImageSafetyLevel(db: Database.Database): 'default' | 'relaxed' {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'gemini_image_safety'").get() as { value?: string } | undefined;
+  const fromDb = row?.value?.toLowerCase().trim();
+  const fromEnv = process.env.GEMINI_IMAGE_SAFETY?.toLowerCase().trim();
+  const value = fromDb ?? fromEnv ?? '';
+  return value === 'relaxed' ? 'relaxed' : 'default';
+}
+
 export function cleanupStaleScenes(db: Database.Database) {
   logger.info('scenes', 'Cleaning up stale generating scenes');
 
@@ -127,6 +233,17 @@ export function cleanupStaleScenes(db: Database.Database) {
     SET status = 'failed', error_message = 'Server restarted during processing'
     WHERE status = 'processing'
   `).run();
+}
+
+/** Mark scene and render job as failed when background generation rejects (safety net so frontend stops polling). */
+function markSceneGenerationFailed(db: Database.Database, sceneId: string, jobId: string, err: unknown): void {
+  const msg = getErrorMessage(err);
+  try {
+    db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, sceneId);
+    db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
+  } catch (dbErr) {
+    logger.error('scenes', 'Failed to mark scene as failed', { sceneId, jobId, dbError: (dbErr as Error)?.message });
+  }
 }
 
 export function createScenesRouter(db: Database.Database) {
@@ -161,6 +278,67 @@ export function createScenesRouter(db: Database.Database) {
     const paths = files.map(f => `/uploads/${f.filename}`);
     logger.info('scenes', `Motif(s) uploaded: ${paths.length} file(s)`);
     res.json({ paths, path: paths[0] });
+  }));
+
+  // POST preview-prompt – build enriched + image prompt for display (no scene created, no image generated)
+  router.post('/preview-prompt', asyncHandler(async (req, res) => {
+    validateSceneCreate(req.body, db);
+    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths, motifDisplayMode } = req.body;
+    const safeMaterialIds: string[] = Array.isArray(materialIds) ? materialIds : [];
+    const motifPaths: string[] = Array.isArray(motifImagePaths) && motifImagePaths.length
+      ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES)
+      : (motifImagePath ? [motifImagePath] : []);
+    const extraRefPaths: string[] = Array.isArray(extraReferencePaths)
+      ? extraReferencePaths.slice(0, MAX_EXTRA_REFERENCE_IMAGES) : [];
+    const promptTagsArr: string[] = Array.isArray(promptTags) ? promptTags : [];
+
+    let template: any = null;
+    if (templateId) {
+      template = db.prepare('SELECT * FROM scene_templates WHERE id = ?').get(templateId);
+      if (!template) throw new NotFoundError('template', templateId);
+    }
+
+    const materials: any[] = [];
+    for (const matId of safeMaterialIds) {
+      const mat = db.prepare('SELECT * FROM materials WHERE id = ?').get(matId) as any;
+      if (!mat) throw new NotFoundError('material', matId);
+      if (mat.status === 'idle') continue;
+      const images = db.prepare('SELECT * FROM material_images WHERE material_id = ?').all(matId);
+      materials.push({ ...mat, images });
+    }
+
+    const keys = getImageProviderKeys(db);
+    const hasPromptKey = (keys.geminiApiKey && keys.geminiApiKey !== 'your-api-key-here') || (keys.openaiApiKey && keys.openaiApiKey.trim() !== '');
+    if (!hasPromptKey) {
+      throw new ValidationError('Für die Prompt-Generierung wird ein API-Key benötigt. Bitte in den Einstellungen (⚙️) einen Gemini- oder OpenAI-API-Key eintragen.');
+    }
+    if (keys.imageProviderName === 'gemini' && (!keys.geminiApiKey || keys.geminiApiKey === 'your-api-key-here')) {
+      throw new ValidationError('Kein gültiger Gemini API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Gemini API-Key hinterlegen (für die Bildgenerierung).');
+    }
+    if (keys.imageProviderName === 'replicate' && !keys.replicateApiKey) {
+      throw new ValidationError('Kein Replicate API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Replicate API-Key hinterlegen.');
+    }
+    const enricher = getScenePromptEnricher(db);
+
+    let motifDisplay: 'auto' | 'template' | 'stretched' = (motifDisplayMode === 'template' || motifDisplayMode === 'stretched') ? motifDisplayMode : 'auto';
+    if (motifDisplay === 'auto' && motifPaths.length > 0) {
+      motifDisplay = await detectMotifDisplayModeFromPaths(resolveMotifFullPath, motifPaths);
+    }
+    const { enrichedPrompt, imagePrompt } = await buildPromptsForScene(
+      db,
+      enricher,
+      materials,
+      template,
+      sceneDescription || null,
+      format || null,
+      exportPreset || 'free',
+      blueprintImagePath || null,
+      motifPaths,
+      promptTagsArr,
+      extraRefPaths,
+      motifDisplay
+    );
+    res.json({ enrichedPrompt, imagePrompt });
   }));
 
   // POST upload extra reference image(s) – persons, objects, etc. for prompt referencing
@@ -204,6 +382,7 @@ export function createScenesRouter(db: Database.Database) {
       motif_image_path,
       motif_image_paths,
       extra_reference_paths,
+      motif_display_mode,
       materialIds,
     } = req.body;
 
@@ -269,6 +448,11 @@ export function createScenesRouter(db: Database.Database) {
           ? (extra_reference_paths.length ? JSON.stringify(extra_reference_paths) : null)
           : extra_reference_paths === '' ? null : extra_reference_paths
       );
+    }
+    if (motif_display_mode !== undefined) {
+      const valid = ['auto', 'template', 'stretched'].includes(String(motif_display_mode));
+      updates.push('motif_display_mode = ?');
+      values.push(valid ? motif_display_mode : 'auto');
     }
 
     if (updates.length > 0) {
@@ -344,10 +528,7 @@ export function createScenesRouter(db: Database.Database) {
 
     const materialContext = buildSceneMaterialContext(filteredMaterials);
 
-    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
-      || process.env.GEMINI_API_KEY;
-    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
-    const provider = getImageProvider(providerName, apiKey);
+    const provider = getConfiguredImageProvider(db);
 
     let userFeedbackInput = `USER FEEDBACK:\n${scene.review_notes.trim()}\n\nORIGINAL SCENE CONTEXT:\n${scene.enriched_prompt.slice(0, 800)}\n\nMATERIAL CONTEXT (GROUND TRUTH):\n${materialContext}`;
 
@@ -361,7 +542,8 @@ export function createScenesRouter(db: Database.Database) {
     }
 
     logger.info('scenes', `Preparing refinement instructions for scene ${scene.id} (extensionImage=${hasExtensionImage}, materials=${filteredMaterials.length})`);
-    const addendum = await provider.enrichPrompt(FEEDBACK_ADDENDUM_SYSTEM_PROMPT, userFeedbackInput);
+    const enricher = getScenePromptEnricher(db);
+    const addendum = await enricher.enrichPrompt(FEEDBACK_ADDENDUM_SYSTEM_PROMPT, userFeedbackInput);
 
     res.json({
       promptAddendum: addendum.trim()
@@ -418,10 +600,7 @@ export function createScenesRouter(db: Database.Database) {
       }
     }
 
-    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
-      || process.env.GEMINI_API_KEY;
-    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
-    const provider = getImageProvider(providerName, apiKey);
+    const provider = getConfiguredImageProvider(db);
 
     // If no addendum provided, generate it using material context
     if (!addendumTrimmed) {
@@ -429,7 +608,8 @@ export function createScenesRouter(db: Database.Database) {
       const userFeedbackInput = `USER FEEDBACK:\n${scene.review_notes.trim()}\n\nORIGINAL SCENE CONTEXT:\n${scene.enriched_prompt.slice(0, 800)}\n\nMATERIAL CONTEXT (GROUND TRUTH):\n${materialContext}`;
 
       logger.info('scenes', `Generating feedback addendum for scene ${scene.id}`);
-      const addendum = await provider.enrichPrompt(FEEDBACK_ADDENDUM_SYSTEM_PROMPT, userFeedbackInput);
+      const enricher = getScenePromptEnricher(db);
+      const addendum = await enricher.enrichPrompt(FEEDBACK_ADDENDUM_SYSTEM_PROMPT, userFeedbackInput);
       addendumTrimmed = addendum.trim();
     }
 
@@ -477,6 +657,7 @@ export function createScenesRouter(db: Database.Database) {
 
     generateImageWithFeedback(db, scene.id, jobId, updatedScene, materialsArrForGen, addendumTrimmed, bodyExtraPaths).catch(err => {
       logger.error('scenes', `Regeneration with feedback failed for scene ${scene.id}`, { error: err?.message });
+      markSceneGenerationFailed(db, scene.id, jobId, err);
     });
   }));
 
@@ -573,7 +754,7 @@ export function createScenesRouter(db: Database.Database) {
   router.post('/', asyncHandler(async (req, res) => {
     validateSceneCreate(req.body, db);
 
-    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths } = req.body;
+    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths, motifDisplayMode } = req.body;
     const safeMaterialIds: string[] = Array.isArray(materialIds) ? materialIds : [];
     const motifPaths: string[] = Array.isArray(motifImagePaths) && motifImagePaths.length
       ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES)
@@ -619,15 +800,19 @@ export function createScenesRouter(db: Database.Database) {
     const motifPathSingle = motifPaths[0] || null;
     const promptTagsJson = Array.isArray(promptTags) ? JSON.stringify(promptTags) : null;
     const extraRefPathsJson = extraRefPaths.length ? JSON.stringify(extraRefPaths) : null;
+    let motifDisplay: 'auto' | 'template' | 'stretched' = (motifDisplayMode === 'template' || motifDisplayMode === 'stretched') ? motifDisplayMode : 'auto';
+    if (motifDisplay === 'auto' && motifPaths.length > 0) {
+      motifDisplay = await detectMotifDisplayModeFromPaths(resolveMotifFullPath, motifPaths);
+    }
     const presetRow = db.prepare('SELECT width, height FROM export_presets WHERE id = ?').get(exportPreset || 'free') as { width: number; height: number } | undefined;
     const targetWidth = presetRow?.width ?? null;
     const targetHeight = presetRow?.height ?? null;
     db.prepare(`
-      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, prompt_tags, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, image_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
+      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, prompt_tags, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, motif_display_mode, image_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
     `).run(sceneId, pid, `Scene ${orderIndex + 1}`, orderIndex + 1, templateId || null,
       sceneDescription || null, promptTagsJson, format || null, exportPreset || 'free', targetWidth, targetHeight, blueprintImagePath || null,
-      motifPathSingle, motifPathsJson, extraRefPathsJson);
+      motifPathSingle, motifPathsJson, extraRefPathsJson, motifDisplay);
 
     // Link materials (if any were selected)
     const insertMat = db.prepare('INSERT INTO scene_materials (scene_id, material_id) VALUES (?, ?)');
@@ -650,8 +835,9 @@ export function createScenesRouter(db: Database.Database) {
     });
 
     // Background generation
-    generateImage(db, sceneId, jobId, materials, template, sceneDescription, format, exportPreset, blueprintImagePath, motifPaths, promptTags, extraRefPaths).catch(err => {
+    generateImage(db, sceneId, jobId, materials, template, sceneDescription, format, exportPreset, blueprintImagePath, motifPaths, promptTags, extraRefPaths, { motifDisplayMode: motifDisplay }).catch(err => {
       logger.error('scenes', `Background image generation failed for scene ${sceneId}`, { error: err?.message });
+      markSceneGenerationFailed(db, sceneId, jobId, err);
     });
   }));
 
@@ -697,8 +883,13 @@ export function createScenesRouter(db: Database.Database) {
     const motifPaths = getMotifPathsFromScene(scene);
     const extraRefPaths = getExtraRefPathsFromScene(scene);
     const promptTags = scene.prompt_tags ? JSON.parse(scene.prompt_tags) : [];
-    generateImage(db, scene.id, jobId, Array.from(materialMap.values()), template, scene.scene_description, scene.format, scene.export_preset, scene.blueprint_image_path, motifPaths, promptTags, extraRefPaths).catch(err => {
+    let motifDisplay: 'auto' | 'template' | 'stretched' = (scene.motif_display_mode === 'template' || scene.motif_display_mode === 'stretched') ? scene.motif_display_mode : 'auto';
+    if (motifDisplay === 'auto' && motifPaths.length > 0) {
+      motifDisplay = await detectMotifDisplayModeFromPaths(resolveMotifFullPath, motifPaths);
+    }
+    generateImage(db, scene.id, jobId, Array.from(materialMap.values()), template, scene.scene_description, scene.format, scene.export_preset, scene.blueprint_image_path, motifPaths, promptTags, extraRefPaths, { motifDisplayMode: motifDisplay }).catch(err => {
       logger.error('scenes', `Regeneration failed for scene ${scene.id}`, { error: err?.message });
+      markSceneGenerationFailed(db, scene.id, jobId, err);
     });
   }));
 
@@ -751,15 +942,16 @@ export function createScenesRouter(db: Database.Database) {
     const variantMotifPathsJson = variantMotifPaths.length ? JSON.stringify(variantMotifPaths) : null;
     const variantExtraRefPaths = getExtraRefPathsFromScene(sourceScene);
     const variantExtraRefPathsJson = variantExtraRefPaths.length ? JSON.stringify(variantExtraRefPaths) : null;
+    const variantMotifDisplay = (sourceScene.motif_display_mode === 'template' || sourceScene.motif_display_mode === 'stretched') ? sourceScene.motif_display_mode : 'auto';
     const variantTargetWidth = presetInfo?.width ?? null;
     const variantTargetHeight = presetInfo?.height ?? null;
     db.prepare(`
-      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, enriched_prompt, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, image_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
+      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, enriched_prompt, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, motif_display_mode, image_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
     `).run(sceneId, sourceScene.project_id, variantName, orderIndex + 1,
       sourceScene.template_id || null, sourceScene.scene_description || null,
       sourceScene.enriched_prompt, sourceScene.format || null, exportPreset,
-      variantTargetWidth, variantTargetHeight, sourceScene.blueprint_image_path || null, variantMotifPaths[0] || null, variantMotifPathsJson, variantExtraRefPathsJson);
+      variantTargetWidth, variantTargetHeight, sourceScene.blueprint_image_path || null, variantMotifPaths[0] || null, variantMotifPathsJson, variantExtraRefPathsJson, variantMotifDisplay);
 
     // Link same materials
     const insertMat = db.prepare('INSERT INTO scene_materials (scene_id, material_id) VALUES (?, ?)');
@@ -778,6 +970,7 @@ export function createScenesRouter(db: Database.Database) {
     // Background: image-to-image – take source scene's image and reformat to target aspect ratio only (no new scene from text)
     generateImageFormatVariant(db, sceneId, jobId, sourceScene, exportPreset).catch(err => {
       logger.error('scenes', `Format variant generation failed for scene ${sceneId}`, { error: err?.message });
+      markSceneGenerationFailed(db, sceneId, jobId, err);
     });
   }));
 
@@ -807,10 +1000,7 @@ export function createScenesRouter(db: Database.Database) {
     const ext = path.extname(imagePath).toLowerCase();
     const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
 
-    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
-      || process.env.GEMINI_API_KEY;
-    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
-    const provider = getImageProvider(providerName, apiKey);
+    const provider = getConfiguredImageProvider(db);
 
     logger.info('scenes', `Running Vision Correction for scene ${scene.id}`);
 
@@ -839,7 +1029,8 @@ ${materialContext}
 ORIGINAL SCENE PROMPT:
 ${scene.enriched_prompt?.slice(0, 800)}`;
 
-    const addendum = await provider.enrichPrompt(FEEDBACK_ADDENDUM_SYSTEM_PROMPT, addendumRequest);
+    const enricher = getScenePromptEnricher(db);
+    const addendum = await enricher.enrichPrompt(FEEDBACK_ADDENDUM_SYSTEM_PROMPT, addendumRequest);
     const addendumTrimmed = addendum.trim();
 
     if (!addendumTrimmed) {
@@ -868,6 +1059,7 @@ ${scene.enriched_prompt?.slice(0, 800)}`;
 
     generateImageWithFeedback(db, scene.id, jobId, updatedScene, Array.from(materialMap.values()), addendumTrimmed).catch(err => {
       logger.error('scenes', `Vision Correction regeneration failed for scene ${scene.id}`, { error: err?.message });
+      markSceneGenerationFailed(db, scene.id, jobId, err);
     });
   }));
 
@@ -877,6 +1069,109 @@ ${scene.enriched_prompt?.slice(0, 800)}`;
 /** Options for generateImage. When existingEnrichedPrompt is set, Scene Intelligence is skipped (format variant flow). */
 interface GenerateImageOptions {
   existingEnrichedPrompt?: string | null;
+  motifDisplayMode?: MotifDisplayMode;
+}
+
+/** motif_display_mode: how to present uploaded motif images (auto = infer from image; template = unrolled with white edge; stretched = on Keilrahmen). */
+export type MotifDisplayMode = 'auto' | 'template' | 'stretched';
+
+function getMotifPresentationHint(mode: MotifDisplayMode): string {
+  if (mode === 'template') {
+    return ' MOTIF PRESENTATION: Display the uploaded motif(s) as an UNROLLED painting template (Malvorlage) on the table – with white edge and logos visible, NOT stretched on a frame.';
+  }
+  if (mode === 'stretched') {
+    return ' MOTIF PRESENTATION: Display the uploaded motif(s) as a STRETCHED CANVAS on a Keilrahmen (on the wall or table as appropriate).';
+  }
+  return ' MOTIF PRESENTATION: Look at each uploaded motif reference image. If the image shows a WHITE BORDER/EDGE with LOGOS (a painting template / Malvorlage laid flat), render it as an UNROLLED painting template on the table – white edge and logos visible, NOT stretched on a frame. If the image has NO white border (just the artwork), render it as a STRETCHED CANVAS on a Keilrahmen (on wall or table).';
+}
+
+/** Build enriched prompt and full image prompt for preview (no DB write, no image generation). */
+async function buildPromptsForScene(
+  db: Database.Database,
+  enricher: { enrichPrompt: (system: string, user: string) => Promise<string> },
+  materials: any[],
+  template: any,
+  sceneDescription: string | null,
+  format: string | null,
+  exportPreset: string,
+  blueprintImagePath: string | null,
+  motifPaths: string[],
+  promptTags: string[],
+  extraRefImagePaths: string[],
+  motifDisplayMode: MotifDisplayMode = 'auto'
+): Promise<{ enrichedPrompt: string; imagePrompt: string }> {
+  const activeMaterials = materials.filter((m: any) => m.status !== 'idle');
+  const hasMotif = motifPaths.length > 0;
+  const materialCategories = activeMaterials.map((m: any) => m.category);
+
+  let aspectRatio = EXPORT_PRESET_TO_ASPECT_RATIO[exportPreset] || '3:2';
+  const presetRowForAr = db.prepare('SELECT width, height FROM export_presets WHERE id = ?').get(exportPreset) as any;
+  if (presetRowForAr) {
+    aspectRatio = widthHeightToAspectRatio(presetRowForAr.width, presetRowForAr.height);
+  }
+
+  const tagPromptsMap = getTagPromptsMap(db);
+  const materialContext = buildSceneMaterialContext(activeMaterials);
+  const tagPrompts = promptTags.map(id => tagPromptsMap[id]).filter(Boolean);
+
+  let templatePrompt = template?.prompt_template?.replace('{materials}', materialContext) || '';
+  if (!template) {
+    const tagContext = tagPrompts.length > 0
+      ? `Given the selected scene elements (${promptTags.join(', ')}), choose the most professional and visually appealing composition for these products.`
+      : 'Choose the most professional and visually appealing product photography composition for these materials.';
+    templatePrompt = `No specific template selected. AI DECISION REQUIRED: ${tagContext}`;
+  }
+
+  const hasExtraRefs = extraRefImagePaths.length > 0;
+  const extraRefPromptLine = hasExtraRefs
+    ? `## Additional Reference Images (Person/Objects): ${extraRefImagePaths.length} extra reference image(s) have been provided by the user. These images show persons, objects, or visual references that the user may describe in their instructions above. The user can refer to them as "Extra-Referenzbild 1", "Extra-Referenzbild 2", etc. (numbered in order). Use these images to faithfully reproduce the depicted person/object/visual in the generated scene as described by the user. These extra reference images appear AFTER the blueprint image and BEFORE the motif images in the reference image sequence.`
+    : '';
+
+  const motifAspectRatios = hasMotif ? getMotifAspectRatios(motifPaths) : [];
+  const motifFormatSpec = motifAspectRatios.length
+    ? ` Exact format for each motif (MUST be preserved 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.`
+    : '';
+  const paintingTemplateWithMotifHint = hasMotif && blueprintImagePath
+    ? ' The first reference image (blueprint) is a PAINTING TEMPLATE (Malvorlage). You MUST keep the entire template visible: all logos, branding, numbers, outlines, and layout. Do NOT replace or remove the template. In the NUMBERED AREAS ONLY (the regions meant to be painted), combine with the user\'s uploaded motif(s): show the motif content there – either half-painted or fully painted – so the motif appears in those zones. The rest of the template (logos, numbers, borders, structure) must stay exactly as in the reference. The motif images are the last reference image(s); use them only inside the numbered areas of the template.'
+    : '';
+  const motifPresentationHint = hasMotif ? getMotifPresentationHint(motifDisplayMode) : '';
+  const motifPromptLine = hasMotif
+    ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or in the numbered areas of a painting template). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${paintingTemplateWithMotifHint}${motifPresentationHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
+    : '';
+
+  const tagSection = tagPrompts.length > 0
+    ? `## Scene Elements & Context:\n${tagPrompts.map((p: string) => `- ${p}`).join('\n')}`
+    : '';
+
+  const materialRestriction = buildMaterialRestrictionPrompt(materialCategories);
+  const materialsSection = activeMaterials.length > 0
+    ? `## Materials in this scene (ONLY these may appear):\n${materialContext}\nOnly the materials listed above may appear in the scene. Do not add brushes, palettes, pencils, pens, or any object that is not in this list. No generic or foreign props.`
+    : '## Materials: No specific materials were selected. Do not show paint pots (Farbtöpfe), brushes (Pinsel), palettes (Malpalette), colored pencils, pens, or unpainted/blank canvas. Focus only on the environment and any uploaded motifs.';
+
+  const userPromptParts = [
+    materialsSection,
+    materialRestriction,
+    `## Scene Guidance: ${templatePrompt}`,
+    tagSection,
+    sceneDescription ? `## User Custom Instructions: ${sceneDescription}` : '',
+    format ? `## Style Format: ${format} (vorlage = unframed template with numbers, gerahmt = stretched on wooden frame, ausmalen = artistically painted)` : '',
+    extraRefPromptLine,
+    motifPromptLine,
+    `\nGenerate a detailed, photorealistic scene description optimized for AI image generation. Include specific details about:\n1. Exact placement and arrangement of each element\n2. Lighting direction, color temperature, and shadows\n3. Camera angle and depth of field\n4. Surface interactions (reflections, shadows, textures)\n5. Overall mood and atmosphere`,
+  ].filter(Boolean).join('\n\n');
+
+  let enrichedPrompt = await enricher.enrichPrompt(SCENE_INTELLIGENCE_SYSTEM_PROMPT, userPromptParts);
+  if (!enrichedPrompt || enrichedPrompt.trim().length === 0) {
+    enrichedPrompt = sceneDescription || 'A professional product photography scene showcasing the materials';
+  }
+  if (hasExtraRefs && enrichedPrompt.trim().length > 0) {
+    enrichedPrompt = enrichedPrompt.trim() + '\n\nThe user has uploaded one or more additional reference images (person, object, or visual). The generated image MUST include and faithfully reproduce the content of these reference image(s) in the scene, placed and styled in a natural way. They are provided as the additional reference images (in order: first, second, …) after the blueprint in the reference image set.';
+  }
+
+  const enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, enrichedPrompt);
+  const paintingTemplateWithMotif = hasMotif && !!blueprintImagePath;
+  const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, undefined, motifAspectRatios, paintingTemplateWithMotif, motifDisplayMode);
+  return { enrichedPrompt: enrichedPromptWithPatterns, imagePrompt };
 }
 
 /**
@@ -891,16 +1186,20 @@ async function generateImageFormatVariant(
   targetExportPreset: string
 ): Promise<void> {
   try {
-    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
-      || process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your-api-key-here') {
+    const keys = getImageProviderKeys(db);
+    if (keys.imageProviderName === 'gemini' && (!keys.geminiApiKey || keys.geminiApiKey === 'your-api-key-here')) {
       const msg = 'Kein gültiger API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Gemini API-Key hinterlegen.';
       db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, variantSceneId);
       db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
       return;
     }
-    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
-    const provider = getImageProvider(providerName, apiKey);
+    if (keys.imageProviderName === 'replicate' && !keys.replicateApiKey) {
+      const msg = 'Kein Replicate API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Replicate API-Key hinterlegen.';
+      db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, variantSceneId);
+      db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
+      return;
+    }
+    const provider = getConfiguredImageProvider(db);
 
     const sourcePath = path.join(process.cwd(), '..', 'public', sourceScene.image_path);
     if (!fs.existsSync(sourcePath)) {
@@ -932,13 +1231,20 @@ RULES:
 - Output exactly one image, aspect ratio ${targetAspectRatio}, that looks complete and professional.`;
 
     logger.info('scenes', `Format variant for scene ${variantSceneId}: reformatting source image to aspect=${targetAspectRatio}`);
-    const result = await provider.generateImage({
+    const lora = getLoraConfig(db);
+    const variantReq = {
       prompt,
-      referenceImages: [],
+      referenceImages: [] as { base64: string; mimeType: string }[],
       aspectRatio: targetAspectRatio,
-      imageSize: '2K',
+      imageSize: '2K' as const,
       sourceImage,
-    });
+      safetyLevel: getImageSafetyLevel(db),
+      ...(lora.loraUrl && { loraUrl: lora.loraUrl, loraTriggerWord: lora.loraTriggerWord, loraScale: lora.loraScale }),
+      disableSafetyChecker: true,
+      replicateFluxVersion: getReplicateFluxVersion(db),
+      ...(presetRow?.width != null && presetRow?.height != null && { targetWidth: presetRow.width, targetHeight: presetRow.height }),
+    };
+    const result = await provider.generateImage(variantReq);
 
     fs.mkdirSync(rendersDir, { recursive: true });
     const imagePath = `/renders/${variantSceneId}.png`;
@@ -949,10 +1255,12 @@ RULES:
       .run(imagePath, variantSceneId);
     db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ? WHERE id = ?")
       .run(result.cost || 0.04, jobId);
+    const variantSceneRow = db.prepare('SELECT template_id FROM scenes WHERE id = ?').get(variantSceneId) as { template_id: string | null } | undefined;
+    setTemplatePreviewIfMissing(db, variantSceneRow?.template_id ?? null, imagePath);
 
     logger.info('scenes', `Format variant generated for scene ${variantSceneId}`);
   } catch (error: any) {
-    const errorMsg = error?.message || 'Unknown error';
+    const errorMsg = getErrorMessage(error);
     logger.error('scenes', `Format variant failed for scene ${variantSceneId}`, { error: errorMsg });
     db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(errorMsg, variantSceneId);
     db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -976,21 +1284,35 @@ async function generateImage(
   options?: GenerateImageOptions
 ): Promise<void> {
   try {
-    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
-      || process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your-api-key-here') {
+    const keys = getImageProviderKeys(db);
+    if (keys.imageProviderName === 'gemini' && (!keys.geminiApiKey || keys.geminiApiKey === 'your-api-key-here')) {
       const msg = 'Kein gültiger API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Gemini API-Key hinterlegen.';
       db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, sceneId);
       db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
       return;
     }
-    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
-    const provider = getImageProvider(providerName, apiKey);
+    if (keys.imageProviderName === 'replicate' && !keys.replicateApiKey) {
+      const msg = 'Kein Replicate API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Replicate API-Key hinterlegen.';
+      db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, sceneId);
+      db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
+      return;
+    }
+    const provider = getConfiguredImageProvider(db);
+    const configuredProviderName = keys.imageProviderName;
 
     // Safety filter: Ensure only non-idle materials are used
     const activeMaterials = materials.filter(m => m.status !== 'idle');
     const motifPaths = Array.isArray(motifImagePaths) ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES) : [];
     const hasMotif = motifPaths.length > 0;
+    const motifAspectRatios = hasMotif ? getMotifAspectRatios(motifPaths) : [];
+
+    logger.info('scenes', 'IMAGE_GEN_START', {
+      sceneId,
+      jobId,
+      configuredProvider: configuredProviderName,
+      motifCount: motifPaths.length,
+      extraRefCount: extraRefImagePaths.length,
+    });
     const materialCategories = activeMaterials.map((m: any) => m.category);
 
     // Resolve aspect ratio (needed for both normal and format-variant paths)
@@ -1001,21 +1323,23 @@ async function generateImage(
     }
 
     let enrichedPromptWithPatterns: string;
+    const motifDisplay = options?.motifDisplayMode ?? 'auto';
 
     if (options?.existingEnrichedPrompt?.trim()) {
       // Format variant: reuse existing enriched prompt, skip Scene Intelligence. Same content/style, only aspect ratio changes.
-      const variantInstruction = `FORMAT VARIANT – SAME CONTENT, NEW ASPECT RATIO ONLY (target aspect ratio: ${aspectRatio}): The following scene description is fixed. Generate the SAME scene with the SAME composition, materials, style (e.g. stretched canvas / gerahmt, no classic frame), and mood. Only the output aspect ratio is different. Do not change or reinterpret the scene.\n\n`;
+      const variantInstruction = `FORMAT VARIANT – SAME CONTENT, NEW ASPECT RATIO ONLY (target aspect ratio: ${aspectRatio}): The following scene description is fixed. Generate the SAME scene with the SAME composition, materials, presentation style (as defined by the scene template and format: vorlage/gerahmt/ausmalen), and mood. Only the output aspect ratio is different. Do not change or reinterpret the scene. Do not add or change frame types (e.g. shadow gap, floating frame); keep the presentation exactly as in the source.\n\n`;
       const baseEnriched = variantInstruction + options.existingEnrichedPrompt.trim();
       enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, baseEnriched);
       db.prepare('UPDATE scenes SET enriched_prompt = ? WHERE id = ?').run(enrichedPromptWithPatterns, sceneId);
       logger.info('scenes', `Format variant for scene ${sceneId}: reusing enriched prompt, aspect=${aspectRatio}`);
     } else {
+    const tagPromptsMap = getTagPromptsMap(db);
     // Build material context
     const materialContext = buildSceneMaterialContext(activeMaterials);
 
     // Build tag strings
     const tagPrompts = promptTags
-      .map(id => TAG_PROMPTS[id])
+      .map(id => tagPromptsMap[id])
       .filter(Boolean);
 
     // Build scene intelligence prompt
@@ -1035,8 +1359,15 @@ async function generateImage(
       ? `## Additional Reference Images (Person/Objects): ${extraRefImagePaths.length} extra reference image(s) have been provided by the user. These images show persons, objects, or visual references that the user may describe in their instructions above. The user can refer to them as "Extra-Referenzbild 1", "Extra-Referenzbild 2", etc. (numbered in order). Use these images to faithfully reproduce the depicted person/object/visual in the generated scene as described by the user. These extra reference images appear AFTER the blueprint image and BEFORE the motif images in the reference image sequence.`
       : '';
 
+    const motifFormatSpec = motifAspectRatios.length
+      ? ` Exact format for each motif (MUST be preserved 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.`
+      : '';
+    const paintingTemplateWithMotifHint = hasMotif && blueprintImagePath
+      ? ' The first reference image (blueprint) is a PAINTING TEMPLATE (Malvorlage). You MUST keep the entire template visible: all logos, branding, numbers, outlines, and layout. Do NOT replace or remove the template. In the NUMBERED AREAS ONLY (the regions meant to be painted), combine with the user\'s uploaded motif(s): show the motif content there – either half-painted or fully painted – so the motif appears in those zones. The rest of the template (logos, numbers, borders, structure) must stay exactly as in the reference. The motif images are the last reference image(s); use them only inside the numbered areas of the template.'
+      : '';
+    const motifPresentationHint = hasMotif ? getMotifPresentationHint(motifDisplay) : '';
     const motifPromptLine = hasMotif
-      ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion. The motif images are included as the LAST ${motifPaths.length} reference image(s).`
+      ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or in the numbered areas of a painting template). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${paintingTemplateWithMotifHint}${motifPresentationHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
       : '';
 
     const tagSection = tagPrompts.length > 0
@@ -1061,9 +1392,10 @@ async function generateImage(
       `\nGenerate a detailed, photorealistic scene description optimized for AI image generation. Include specific details about:\n1. Exact placement and arrangement of each element\n2. Lighting direction, color temperature, and shadows\n3. Camera angle and depth of field\n4. Surface interactions (reflections, shadows, textures)\n5. Overall mood and atmosphere`,
     ].filter(Boolean).join('\n\n');
 
-    // Scene Intelligence
+    // Scene Intelligence (Gemini oder OpenAI)
     logger.info('scenes', `Running Scene Intelligence for scene ${sceneId}`);
-    let enrichedPrompt = await provider.enrichPrompt(SCENE_INTELLIGENCE_SYSTEM_PROMPT, userPromptParts);
+    const enricher = getScenePromptEnricher(db);
+    let enrichedPrompt = await enricher.enrichPrompt(SCENE_INTELLIGENCE_SYSTEM_PROMPT, userPromptParts);
 
     // Fallback if Scene Intelligence returns empty (sometimes happens with image-only responses)
     if (!enrichedPrompt || enrichedPrompt.trim().length === 0) {
@@ -1082,18 +1414,117 @@ async function generateImage(
     db.prepare('UPDATE scenes SET enriched_prompt = ? WHERE id = ?').run(enrichedPromptWithPatterns, sceneId);
     }
 
-    // Collect reference images
-    const referenceImages = collectReferenceImages(activeMaterials, blueprintImagePath, motifPaths, extraRefImagePaths);
+    // Collect reference images (FLUX 2 Pro: max 8; Grok: max 10; else full list)
+    const fluxVersion = getReplicateFluxVersion(db);
+    const referenceImages = fluxVersion === '2pro'
+      ? collectReferenceImagesForFlux8(activeMaterials, blueprintImagePath, motifPaths, extraRefImagePaths)
+      : fluxVersion === 'grok'
+        ? collectReferenceImagesForGrok(activeMaterials, blueprintImagePath, motifPaths, extraRefImagePaths)
+        : collectReferenceImages(activeMaterials, blueprintImagePath, motifPaths, extraRefImagePaths);
 
-    const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags);
+    const tagPromptsMap = getTagPromptsMap(db);
+    const flux2ProRefIndices = fluxVersion === '2pro' ? { blueprintCount: blueprintImagePath ? 1 : 0, extraRefCount: Math.min(4, extraRefImagePaths.length), motifCount: motifPaths.length } : undefined;
+    const paintingTemplateWithMotif = hasMotif && !!blueprintImagePath;
+    const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, flux2ProRefIndices, motifAspectRatios, paintingTemplateWithMotif, motifDisplay);
 
     logger.info('scenes', `Generating image for scene ${sceneId} with ${referenceImages.length} reference images, aspect=${aspectRatio}`);
-    const result = await provider.generateImage({
+    const lora = getLoraConfig(db);
+    const genReq = {
       prompt: imagePrompt,
       referenceImages,
       aspectRatio,
-      imageSize: '2K',
-    });
+      imageSize: '2K' as const,
+      safetyLevel: getImageSafetyLevel(db),
+      ...(lora.loraUrl && { loraUrl: lora.loraUrl, loraTriggerWord: lora.loraTriggerWord, loraScale: lora.loraScale }),
+      disableSafetyChecker: true,
+      replicateFluxVersion: fluxVersion,
+      ...(presetRowForAr?.width != null && presetRowForAr?.height != null && { targetWidth: presetRowForAr.width, targetHeight: presetRowForAr.height }),
+      ...(fluxVersion !== '2pro' && motifPaths.length > 0 && { motifRefCount: Math.min(8, motifPaths.length) }),
+      ...(fluxVersion === '2pro' && blueprintImagePath && presetRowForAr?.width == null && presetRowForAr?.height == null && { useMatchInputImageAspect: true }),
+    };
+    let result: Awaited<ReturnType<typeof provider.generateImage>>;
+    let fallbackUsed = false;
+    let fallbackMode: 'none' | 'replicate-retry' | 'replicate-sharp-composite' = 'none';
+
+    logger.info('scenes', 'IMAGE_GEN_CALL', { sceneId, jobId, provider: provider.name, refCount: referenceImages.length, motifCount: motifPaths.length });
+
+    try {
+      result = await provider.generateImage(genReq);
+    } catch (error: unknown) {
+      if (!isGeminiPolicyBlockError(error)) throw error;
+
+      const errDetails = error as AIProviderError;
+      logger.warn('scenes', 'IMAGE_GEN_GEMINI_BLOCKED', {
+        sceneId,
+        jobId,
+        originalStatus: errDetails.details?.originalStatus,
+        originalMessage: errDetails.details?.originalMessage,
+        message: errDetails.message,
+      });
+
+      if (!keys.replicateApiKey) {
+        logger.error('scenes', 'IMAGE_GEN_FALLBACK_UNAVAILABLE', { sceneId, jobId, reason: 'no Replicate API key' });
+        throw error;
+      }
+
+      logger.info('scenes', 'IMAGE_GEN_FALLBACK_START', { sceneId, jobId, step: 'FLUX scene without motifs' });
+
+      const replicateProvider = getImageProvider('replicate', keys.geminiApiKey, keys.replicateApiKey);
+      const fallbackFluxVersion = getReplicateFluxVersion(db);
+      const fallbackReferenceImages = fallbackFluxVersion === '2pro'
+        ? collectReferenceImagesForFlux8(activeMaterials, blueprintImagePath, [], extraRefImagePaths)
+        : fallbackFluxVersion === 'grok'
+          ? collectReferenceImagesForGrok(activeMaterials, blueprintImagePath, [], extraRefImagePaths)
+          : collectReferenceImages(activeMaterials, blueprintImagePath, [], extraRefImagePaths);
+      const fallbackPrompt = buildSceneOnlyFallbackPrompt(enrichedPromptWithPatterns, motifPaths.length);
+      const fallbackRefIndices = fallbackFluxVersion === '2pro'
+        ? { blueprintCount: blueprintImagePath ? 1 : 0, extraRefCount: Math.min(4, extraRefImagePaths.length), motifCount: 0 }
+        : undefined;
+      const fallbackImagePrompt = buildImageGenerationPrompt(
+        fallbackPrompt,
+        activeMaterials,
+        false,
+        aspectRatio,
+        promptTags,
+        tagPromptsMap,
+        fallbackRefIndices
+      );
+      const fallbackReq = {
+        prompt: fallbackImagePrompt,
+        referenceImages: fallbackReferenceImages,
+        aspectRatio,
+        imageSize: '2K' as const,
+        safetyLevel: getImageSafetyLevel(db),
+        ...(lora.loraUrl && { loraUrl: lora.loraUrl, loraTriggerWord: lora.loraTriggerWord, loraScale: lora.loraScale }),
+        disableSafetyChecker: true,
+        replicateFluxVersion: fallbackFluxVersion,
+        ...(presetRowForAr?.width != null && presetRowForAr?.height != null && { targetWidth: presetRowForAr.width, targetHeight: presetRowForAr.height }),
+        ...(fallbackFluxVersion === '2pro' && blueprintImagePath && presetRowForAr?.width == null && presetRowForAr?.height == null && { useMatchInputImageAspect: true }),
+      };
+
+      const fallbackSceneResult = await replicateProvider.generateImage(fallbackReq);
+      if (motifPaths.length > 0) {
+        const composed = await composeMotifsOntoBackground({
+          backgroundImageBase64: fallbackSceneResult.imageBase64,
+          motifPaths,
+          publicRoot: path.join(process.cwd(), '..', 'public'),
+          edgeBlend: false,
+        });
+        result = {
+          ...fallbackSceneResult,
+          imageBase64: composed.imageBase64,
+          mimeType: composed.mimeType,
+          provider: 'replicate',
+        };
+        fallbackMode = 'replicate-sharp-composite';
+        logger.info('scenes', 'IMAGE_GEN_FALLBACK_DONE', { sceneId, jobId, path: 'replicate-sharp-composite', usedMotifs: composed.usedMotifs, motifCount: motifPaths.length });
+      } else {
+        result = fallbackSceneResult;
+        fallbackMode = 'replicate-retry';
+        logger.info('scenes', 'IMAGE_GEN_FALLBACK_DONE', { sceneId, jobId, path: 'replicate-retry', motifCount: 0 });
+      }
+      fallbackUsed = true;
+    }
 
     // Save image
     fs.mkdirSync(rendersDir, { recursive: true });
@@ -1121,7 +1552,7 @@ async function generateImage(
       verificationResult = await verificationService.verifyMaterialConsistency(
         result.imageBase64,
         materialsContext,
-        sceneDescription
+        sceneDescription || undefined
       );
 
       // Save verification results to database
@@ -1175,6 +1606,7 @@ async function generateImage(
             const updatedScene = db.prepare('SELECT * FROM scenes WHERE id = ?').get(sceneId) as any;
             generateImageWithFeedback(db, sceneId, refinementJobId, updatedScene, activeMaterials, refinementPrompt).catch(err => {
               logger.error('scenes', `Auto-refinement failed for scene ${sceneId}`, { error: err?.message });
+              markSceneGenerationFailed(db, sceneId, refinementJobId, err);
             });
 
             logger.info('scenes', `Auto-refinement started for scene ${sceneId} (attempt ${attempts}/3)`);
@@ -1184,11 +1616,17 @@ async function generateImage(
       }
     }
 
-    // If verification passed OR max attempts reached OR no materials, mark as done
+    // Persist which path produced the image (gemini | replicate | fallback:replicate-retry | fallback:replicate-sharp-composite)
+    const generationPath = fallbackUsed ? `fallback:${fallbackMode}` : (result.provider || provider.name);
+    const fallbackNote = fallbackUsed ? `fallback_used:${fallbackMode}` : '';
+
     db.prepare("UPDATE scenes SET image_path = ?, image_status = 'done', last_error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
       .run(imagePath, sceneId);
-    db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ? WHERE id = ?")
-      .run(result.cost || 0.04, jobId);
+    db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ?, error_message = ?, generation_path = ? WHERE id = ?")
+      .run(result.cost || 0.04, fallbackNote, generationPath, jobId);
+    setTemplatePreviewIfMissing(db, template?.id ?? null, imagePath);
+
+    logger.info('scenes', 'IMAGE_GEN_DONE', { sceneId, jobId, generationPath, actualProvider: result.provider });
 
     // === NEW: Save successful patterns to memory (score >= 90, only if materials present) ===
     if (verificationResult && verificationResult.score >= 90) {
@@ -1202,13 +1640,14 @@ async function generateImage(
       logger.info('scenes', `Saved successful patterns for ${activeMaterials.length} material categories (score: ${verificationResult.score})`);
     }
 
-    logger.info('scenes', `Image generated successfully for scene ${sceneId}${verificationResult ? ` with verification score ${verificationResult.score}` : ' (no verification - no materials)'}`);
+    logger.info('scenes', `Image generated successfully for scene ${sceneId}${verificationResult ? ` with verification score ${verificationResult.score}` : ' (no verification - no materials)'} [generationPath=${generationPath}]`);
   } catch (error: any) {
-    const errorMsg = error?.message || 'Unknown error';
-    logger.error('scenes', `Image generation failed for scene ${sceneId}`, { error: errorMsg });
+    const errorMsg = getErrorMessage(error);
+    const failedPath = 'failed:unknown';
+    logger.error('scenes', 'IMAGE_GEN_FAILED', { sceneId, jobId, error: errorMsg, generationPath: failedPath });
     db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(errorMsg, sceneId);
-    db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?")
-      .run(errorMsg, jobId);
+    db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP, generation_path = ? WHERE id = ?")
+      .run(errorMsg, failedPath, jobId);
   }
 }
 
@@ -1222,26 +1661,36 @@ async function generateImageWithFeedback(
   extraRefPathsForRequest?: string[]
 ) {
   try {
-    const apiKey = (db.prepare("SELECT value FROM settings WHERE key = 'gemini_api_key'").get() as any)?.value
-      || process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === 'your-api-key-here') {
+    const keys = getImageProviderKeys(db);
+    if (keys.imageProviderName === 'gemini' && (!keys.geminiApiKey || keys.geminiApiKey === 'your-api-key-here')) {
       const msg = 'Kein gültiger API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Gemini API-Key hinterlegen.';
       db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, sceneId);
       db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
       return;
     }
-    const providerName = (db.prepare("SELECT value FROM settings WHERE key = 'image_provider'").get() as any)?.value || 'gemini';
-    const provider = getImageProvider(providerName, apiKey);
+    if (keys.imageProviderName === 'replicate' && !keys.replicateApiKey) {
+      const msg = 'Kein Replicate API-Key konfiguriert. Bitte in den Einstellungen (⚙️) einen Replicate API-Key hinterlegen.';
+      db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, sceneId);
+      db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(msg, jobId);
+      return;
+    }
+    const provider = getConfiguredImageProvider(db);
 
     const motifPaths = getMotifPathsFromScene(scene);
+    const motifAspectRatios = motifPaths.length > 0 ? getMotifAspectRatios(motifPaths) : [];
     const extraRefPaths = (extraRefPathsForRequest?.length
       ? [...getExtraRefPathsFromScene(scene), ...extraRefPathsForRequest].slice(0, MAX_EXTRA_REFERENCE_IMAGES)
       : getExtraRefPathsFromScene(scene));
     const hasMotif = motifPaths.length > 0;
+    const fluxVersionRefinement = getReplicateFluxVersion(db);
 
-    // Refinement always sends: (1) source image to edit, (2) material reference images when selected, (3) extra refs, (4) uploaded motif images
-    const referenceImages = collectReferenceImages(materials, scene.blueprint_image_path, motifPaths, extraRefPaths);
-    logger.info('scenes', `Refinement refs: source image=1, materials=${materials.length}, extraRefs=${extraRefPaths.length}, motifs=${motifPaths.length}, total ref images=${referenceImages.length}`);
+    // Refinement: FLUX 2 Pro uses 8-slot; Grok uses 10-slot; else full list
+    const referenceImages = fluxVersionRefinement === '2pro'
+      ? collectReferenceImagesForFlux8(materials, scene.blueprint_image_path, motifPaths, extraRefPaths)
+      : fluxVersionRefinement === 'grok'
+        ? collectReferenceImagesForGrok(materials, scene.blueprint_image_path, motifPaths, extraRefPaths)
+        : collectReferenceImages(materials, scene.blueprint_image_path, motifPaths, extraRefPaths);
+    logger.info('scenes', `Refinement refs: materials=${materials.length}, extraRefs=${extraRefPaths.length}, motifs=${motifPaths.length}, total=${referenceImages.length}`);
 
     const combinedPrompt = `REFINEMENT REQUEST: This is an Image-to-Image request to fix specific errors in the existing photo.
 1. Maintain the overall composition, lighting, and camera setup of the source image.
@@ -1330,7 +1779,7 @@ ${addendum}`;
     - ONLY apply the corrections listed above.
     - The result must look like the source image with the specific edits applied.
     - ONLY the materials and motifs from the reference images may appear. Do NOT add any new objects (brushes, palettes, colored pencils, pens, or other props) that are not in the reference images.
-    - Motif formats must NEVER be changed: preserve each motif's exact aspect ratio and proportions; no stretching, cropping, or distortion.
+    - Motif formats must NEVER be changed: preserve each motif's exact aspect ratio and proportions; no stretching, cropping, or distortion.${motifAspectRatios.length > 0 ? ` Exact motif formats (MUST preserve 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join('; ')}.` : ''}
     - NEVER add any text, writing, labels, numbers, or letters onto the image unless the user EXPLICITLY requested it in the corrections above. If no text/labels are requested, the image must contain NO visible text or writing.
     
     === OUTPUT ===
@@ -1345,13 +1794,21 @@ ${addendum}`;
     ${scene.enriched_prompt?.slice(0, 1000) || 'No context.'}`;
 
     logger.info('scenes', `Generating image with feedback addendum for scene ${sceneId}, aspect=${aspectRatio}`);
-    const result = await provider.generateImage({
+    const lora = getLoraConfig(db);
+    const refinementReq = {
       prompt: imagePrompt,
       referenceImages,
       aspectRatio,
-      imageSize: '2K',
+      imageSize: '2K' as const,
       sourceImage,
-    });
+      safetyLevel: getImageSafetyLevel(db),
+      ...(lora.loraUrl && { loraUrl: lora.loraUrl, loraTriggerWord: lora.loraTriggerWord, loraScale: lora.loraScale }),
+      disableSafetyChecker: true,
+      replicateFluxVersion: fluxVersionRefinement,
+      ...(targetW != null && targetH != null && targetW > 0 && targetH > 0 && { targetWidth: targetW, targetHeight: targetH }),
+      ...(fluxVersionRefinement !== '2pro' && motifPaths.length > 0 && { motifRefCount: Math.min(8, motifPaths.length) }),
+    };
+    const result = await provider.generateImage(refinementReq);
 
     fs.mkdirSync(rendersDir, { recursive: true });
     const imagePath = `/renders/${sceneId}.png`;
@@ -1362,10 +1819,11 @@ ${addendum}`;
       .run(imagePath, sceneId);
     db.prepare("UPDATE render_jobs SET status = 'completed', completed_at = CURRENT_TIMESTAMP, cost_estimate = ? WHERE id = ?")
       .run(result.cost || 0.04, jobId);
+    setTemplatePreviewIfMissing(db, scene.template_id ?? null, imagePath);
 
     logger.info('scenes', `Image generated with feedback for scene ${sceneId}`);
   } catch (error: any) {
-    const errorMsg = error?.message || 'Unknown error';
+    const errorMsg = getErrorMessage(error);
     logger.error('scenes', `Regenerate with feedback failed for scene ${sceneId}`, { error: errorMsg });
     db.prepare("UPDATE scenes SET image_status = 'failed', last_error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(errorMsg, sceneId);
     db.prepare("UPDATE render_jobs SET status = 'failed', error_message = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -1415,6 +1873,173 @@ function getPerspectivePriority(category: string, perspective: string): number {
       if (perspectiveLower.includes('top')) return 80;
       return 70;
   }
+}
+
+/**
+ * Collect reference images for FLUX 2 Pro (max 8). Priority: Blueprint → ExtraRefs → Motifs → Materials.
+ * Ensures user uploads (blueprint, extraRefs, motifs) are never dropped in favor of material refs.
+ */
+function collectReferenceImagesForFlux8(
+  materials: any[],
+  blueprintImagePath: string | null,
+  motifPaths: string[],
+  extraRefPaths: string[] = []
+): { base64: string; mimeType: string }[] {
+  const out: { base64: string; mimeType: string }[] = [];
+  const maxExtraRefs = 4;
+
+  const push = (base64: string, mimeType: string) => {
+    if (out.length < FLUX2_MAX_REFERENCE_IMAGES) out.push({ base64, mimeType });
+  };
+
+  // 1. Blueprint (slot 1)
+  if (blueprintImagePath && out.length < FLUX2_MAX_REFERENCE_IMAGES) {
+    try {
+      const bpPath = path.join(process.cwd(), '..', 'public', blueprintImagePath);
+      const bpData = fs.readFileSync(bpPath);
+      push(bpData.toString('base64'), 'image/png');
+      logger.info('scenes', 'FLUX8: Added blueprint');
+    } catch { /* ignore */ }
+  }
+
+  // 2. Extra reference images (person, objects)
+  for (let i = 0; i < Math.min(extraRefPaths.length, maxExtraRefs) && out.length < FLUX2_MAX_REFERENCE_IMAGES; i++) {
+    const relPath = extraRefPaths[i];
+    const fullPath = path.join(process.cwd(), '..', 'public', relPath);
+    try {
+      const data = fs.readFileSync(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+      push(data.toString('base64'), mimeType);
+      logger.info('scenes', `FLUX8: Added extra ref ${i + 1}: ${relPath}`);
+    } catch (err) {
+      logger.warn('scenes', `Could not read extra reference image: ${fullPath}`);
+    }
+  }
+
+  // 3. Motifs (all that fit)
+  for (const relPath of motifPaths) {
+    if (out.length >= FLUX2_MAX_REFERENCE_IMAGES) break;
+    const fullPath = path.join(process.cwd(), '..', 'public', relPath);
+    try {
+      const data = fs.readFileSync(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+      push(data.toString('base64'), mimeType);
+      logger.info('scenes', `FLUX8: Added motif: ${relPath}`);
+    } catch (err) {
+      logger.warn('scenes', `Could not read motif image: ${fullPath}`);
+    }
+  }
+
+  // 4. Material reference images (fill remaining slots)
+  const sortedMaterials = [...materials].sort((a, b) => {
+    const priority = (cat: string) => cat === 'paint_pots' ? 0 : (cat === 'brushes' ? 1 : 2);
+    return priority(a.category) - priority(b.category);
+  });
+  for (const mat of sortedMaterials) {
+    if (out.length >= FLUX2_MAX_REFERENCE_IMAGES) break;
+    if (!mat.images?.length) continue;
+    const sortedImages = [...mat.images].sort((a: any, b: any) => getPerspectivePriority(mat.category, b.perspective) - getPerspectivePriority(mat.category, a.perspective));
+    const filtered = mat.category === 'mnz_motif'
+      ? sortedImages.filter((img: any) => !((img.perspective || '').toLowerCase().includes('back')))
+      : sortedImages;
+    let maxPerMat = mat.category === 'paint_pots' ? 5 : mat.category === 'brushes' ? 3 : mat.category === 'mnz_motif' ? 2 : 2;
+    for (const img of filtered.slice(0, maxPerMat)) {
+      if (out.length >= FLUX2_MAX_REFERENCE_IMAGES) break;
+      const imgPath = path.join(process.cwd(), '..', 'public', img.image_path);
+      try {
+        const imageData = fs.readFileSync(imgPath);
+        const ext = path.extname(imgPath).toLowerCase();
+        const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+        push(imageData.toString('base64'), mimeType);
+        logger.info('scenes', `FLUX8: Added material ref: ${mat.name}`);
+      } catch (err) {
+        logger.warn('scenes', `Could not read reference image: ${imgPath}`);
+      }
+    }
+  }
+
+  logger.info('scenes', `FLUX8: Collected ${out.length} reference images (max ${FLUX2_MAX_REFERENCE_IMAGES})`);
+  return out;
+}
+
+/**
+ * Collect reference images for Grok (max GROK_MAX_REFERENCE_IMAGES). Same priority as FLUX 8: Blueprint → ExtraRefs → Motifs → Materials.
+ */
+function collectReferenceImagesForGrok(
+  materials: any[],
+  blueprintImagePath: string | null,
+  motifPaths: string[],
+  extraRefPaths: string[] = []
+): { base64: string; mimeType: string }[] {
+  const out: { base64: string; mimeType: string }[] = [];
+  const maxExtraRefs = 4;
+  const push = (base64: string, mimeType: string) => {
+    if (out.length < GROK_MAX_REFERENCE_IMAGES) out.push({ base64, mimeType });
+  };
+  if (blueprintImagePath && out.length < GROK_MAX_REFERENCE_IMAGES) {
+    try {
+      const bpPath = path.join(process.cwd(), '..', 'public', blueprintImagePath);
+      const bpData = fs.readFileSync(bpPath);
+      push(bpData.toString('base64'), 'image/png');
+      logger.info('scenes', 'Grok: Added blueprint');
+    } catch { /* ignore */ }
+  }
+  for (let i = 0; i < Math.min(extraRefPaths.length, maxExtraRefs) && out.length < GROK_MAX_REFERENCE_IMAGES; i++) {
+    const relPath = extraRefPaths[i];
+    const fullPath = path.join(process.cwd(), '..', 'public', relPath);
+    try {
+      const data = fs.readFileSync(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+      push(data.toString('base64'), mimeType);
+      logger.info('scenes', `Grok: Added extra ref ${i + 1}: ${relPath}`);
+    } catch (err) {
+      logger.warn('scenes', `Could not read extra reference image: ${fullPath}`);
+    }
+  }
+  for (const relPath of motifPaths) {
+    if (out.length >= GROK_MAX_REFERENCE_IMAGES) break;
+    const fullPath = path.join(process.cwd(), '..', 'public', relPath);
+    try {
+      const data = fs.readFileSync(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+      push(data.toString('base64'), mimeType);
+      logger.info('scenes', `Grok: Added motif: ${relPath}`);
+    } catch (err) {
+      logger.warn('scenes', `Could not read motif image: ${fullPath}`);
+    }
+  }
+  const sortedMaterials = [...materials].sort((a, b) => {
+    const priority = (cat: string) => cat === 'paint_pots' ? 0 : (cat === 'brushes' ? 1 : 2);
+    return priority(a.category) - priority(b.category);
+  });
+  for (const mat of sortedMaterials) {
+    if (out.length >= GROK_MAX_REFERENCE_IMAGES) break;
+    if (!mat.images?.length) continue;
+    const sortedImages = [...mat.images].sort((a: any, b: any) => getPerspectivePriority(mat.category, b.perspective) - getPerspectivePriority(mat.category, a.perspective));
+    const filtered = mat.category === 'mnz_motif'
+      ? sortedImages.filter((img: any) => !((img.perspective || '').toLowerCase().includes('back')))
+      : sortedImages;
+    const maxPerMat = mat.category === 'paint_pots' ? 5 : mat.category === 'brushes' ? 3 : mat.category === 'mnz_motif' ? 2 : 2;
+    for (const img of filtered.slice(0, maxPerMat)) {
+      if (out.length >= GROK_MAX_REFERENCE_IMAGES) break;
+      const imgPath = path.join(process.cwd(), '..', 'public', img.image_path);
+      try {
+        const imageData = fs.readFileSync(imgPath);
+        const ext = path.extname(imgPath).toLowerCase();
+        const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+        push(imageData.toString('base64'), mimeType);
+        logger.info('scenes', `Grok: Added material ref: ${mat.name}`);
+      } catch (err) {
+        logger.warn('scenes', `Could not read reference image: ${imgPath}`);
+      }
+    }
+  }
+  logger.info('scenes', `Grok: Collected ${out.length} reference images (max ${GROK_MAX_REFERENCE_IMAGES})`);
+  return out;
 }
 
 function collectReferenceImages(

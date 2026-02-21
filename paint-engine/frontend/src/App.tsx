@@ -14,11 +14,13 @@ import { VideoPanel } from './components/Video/VideoPanel';
 import { SceneGallery } from './components/Project/SceneGallery';
 import { ApiKeyModal } from './components/Settings/ApiKeyModal';
 import { PromptTags } from './components/Scene/PromptTags';
+import { PromptPreviewModal, type PromptPreviewData } from './components/Scene/PromptPreviewModal';
 import { useMaterials } from './hooks/useMaterials';
 import { useTemplates } from './hooks/useTemplates';
 import { useScene } from './hooks/useScene';
 import { usePresets } from './hooks/usePresets';
 import { api } from './services/api';
+import type { PromptTag } from './types';
 
 export default function App() {
   const { materials, engagedMaterials, loading, refresh, toggleStatus, deleteMaterial } = useMaterials();
@@ -35,13 +37,53 @@ export default function App() {
   const [exportPreset, setExportPreset] = useState('');
   const [blueprintPath, setBlueprintPath] = useState<string | null>(null);
   const [motifPaths, setMotifPaths] = useState<string[]>([]);
+  const [motifDisplayMode, setMotifDisplayMode] = useState<'auto' | 'template' | 'stretched'>('auto');
   const [extraReferencePaths, setExtraReferencePaths] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showVideoPanel, setShowVideoPanel] = useState(false);
+  const videoPanelRef = useRef<HTMLDivElement>(null);
   const [sceneMaterialIds, setSceneMaterialIds] = useState<string[]>([]);
   const [savingScene, setSavingScene] = useState(false);
+  const [showPromptPreview, setShowPromptPreview] = useState(false);
+  const [promptPreviewData, setPromptPreviewData] = useState<PromptPreviewData | null>(null);
+  const [promptPreviewLoading, setPromptPreviewLoading] = useState(false);
+  const [promptPreviewShowGenerate, setPromptPreviewShowGenerate] = useState(false);
+  const [pendingGeneratePayload, setPendingGeneratePayload] = useState<Parameters<typeof generateImage>[0] | null>(null);
+  const [promptTags, setPromptTags] = useState<PromptTag[]>([]);
   const lastSyncedSceneIdRef = useRef<string | null>(null);
+  const [imageProvider, setImageProviderState] = useState<string>('replicate');
+  const [replicateFluxVersion, setReplicateFluxVersionState] = useState<'1' | '2pro' | 'grok'>('2pro');
+
+  useEffect(() => {
+    api.settings.getProviders().then(p => {
+      setImageProviderState(p.imageProvider || 'replicate');
+      setReplicateFluxVersionState((p.replicateFluxVersion === 'grok' || p.replicateFluxVersion === '2pro' || p.replicateFluxVersion === '1') ? p.replicateFluxVersion : '2pro');
+    }).catch(() => {});
+  }, []);
+
+  const setImageModel = (provider: string, fluxVersion?: '1' | '2pro' | 'grok') => {
+    const newProvider = provider || 'replicate';
+    const newFlux = fluxVersion ?? (newProvider === 'replicate' ? replicateFluxVersion : '2pro');
+    setImageProviderState(newProvider);
+    if (newProvider === 'replicate') setReplicateFluxVersionState(newFlux);
+    api.settings.setImageProvider(newProvider, newProvider === 'replicate' ? newFlux : undefined).catch(() => {});
+  };
+
+  const refreshPromptTags = () => {
+    api.promptTags.getAll().then(setPromptTags).catch(() => setPromptTags([]));
+  };
+
+  useEffect(() => {
+    refreshPromptTags();
+  }, []);
+
+  // Scroll Video Panel into view when user opens it via "Generate Video"
+  useEffect(() => {
+    if (showVideoPanel && videoPanelRef.current) {
+      videoPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [showVideoPanel]);
 
   // Set default export preset to Instagram Story (9:16) when presets are loaded
   useEffect(() => {
@@ -84,6 +126,8 @@ export default function App() {
       paths = [currentScene.motif_image_path];
     }
     setMotifPaths(paths);
+    const mode = currentScene.motif_display_mode;
+    setMotifDisplayMode((mode === 'template' || mode === 'stretched') ? mode : 'auto');
     let extraRefParsed: string[] = [];
     if (currentScene.extra_reference_paths) {
       try {
@@ -141,6 +185,7 @@ export default function App() {
         export_preset: exportPreset || null,
         blueprint_image_path: blueprintPath || null,
         motif_image_paths: motifPaths.length > 0 ? motifPaths : null,
+        motif_display_mode: motifDisplayMode,
         extra_reference_paths: extraReferencePaths.length > 0 ? extraReferencePaths : null,
         materialIds: sceneMaterialIds,
       });
@@ -158,7 +203,13 @@ export default function App() {
       return;
     }
 
-    const payload = {
+    const payload = buildGeneratePayload();
+    console.log('[App] Generating image:', payload);
+    generateImage(payload);
+  };
+
+  function buildGeneratePayload() {
+    return {
       projectId: 'default',
       templateId: selectedTemplate || undefined,
       sceneDescription: sceneDescription || undefined,
@@ -169,9 +220,33 @@ export default function App() {
       blueprintImagePath: blueprintPath || undefined,
       motifImagePaths: motifPaths.length ? motifPaths : undefined,
       extraReferencePaths: extraReferencePaths.length ? extraReferencePaths : undefined,
+      motifDisplayMode: motifDisplayMode !== 'auto' ? motifDisplayMode : undefined,
     };
-    console.log('[App] Generating image:', payload);
-    generateImage(payload);
+  }
+
+  const handlePreviewPrompt = async (showGenerateButton: boolean) => {
+    if (!exportPreset) return;
+    const payload = buildGeneratePayload();
+    setPromptPreviewData(null);
+    setPromptPreviewShowGenerate(showGenerateButton);
+    setPendingGeneratePayload(showGenerateButton ? payload : null);
+    setShowPromptPreview(true);
+    setPromptPreviewLoading(true);
+    try {
+      const data = await api.scenes.previewPrompt(payload);
+      setPromptPreviewData(data);
+    } catch {
+      setShowPromptPreview(false);
+    } finally {
+      setPromptPreviewLoading(false);
+    }
+  };
+
+  const handleConfirmGenerate = () => {
+    if (pendingGeneratePayload) {
+      generateImage(pendingGeneratePayload);
+      setPendingGeneratePayload(null);
+    }
   };
 
   const handleDisengage = (id: string) => {
@@ -246,6 +321,28 @@ export default function App() {
             </div>
           )}
 
+          {/* Bildmodell – direkt in der Sidebar wählbar, Standard FLUX 2 Pro */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-medium text-gray-400 uppercase tracking-wider">Bildmodell</label>
+            <select
+              value={imageProvider === 'replicate' ? `replicate-${replicateFluxVersion}` : imageProvider}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === 'gemini') setImageModel('gemini');
+                else if (v === 'replicate-2pro') setImageModel('replicate', '2pro');
+                else if (v === 'replicate-1') setImageModel('replicate', '1');
+                else if (v === 'replicate-grok') setImageModel('replicate', 'grok');
+                else setImageModel('replicate', '2pro');
+              }}
+              className="w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+            >
+              <option value="replicate-2pro">FLUX 2 Pro (Standard)</option>
+              <option value="replicate-1">FLUX 1.1 (LoRA)</option>
+              <option value="replicate-grok">Grok (xAI)</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+
           {/* Template Picker */}
           <TemplatePicker
             templates={templates}
@@ -265,7 +362,20 @@ export default function App() {
           <PromptTags
             selectedTags={selectedTags}
             onToggleTag={toggleTag}
+            tags={promptTags}
+            onTagsChange={refreshPromptTags}
+            onPreviewPrompt={!isEditMode && exportPreset ? () => handlePreviewPrompt(false) : undefined}
           />
+          {!isEditMode && (
+            <button
+              type="button"
+              onClick={() => handlePreviewPrompt(false)}
+              disabled={!exportPreset || promptPreviewLoading}
+              className="w-full py-2 rounded-lg border border-white/10 text-xs font-medium text-gray-300 hover:bg-white/5 disabled:opacity-50 transition-colors"
+            >
+              {promptPreviewLoading ? 'Prompt wird generiert…' : 'Prompt generieren'}
+            </button>
+          )}
 
           {/* Format Selector */}
           <FormatSelector
@@ -280,6 +390,25 @@ export default function App() {
             onChange={setMotifPaths}
             visible={true}
           />
+          {motifPaths.length > 0 && (
+            <div className="mb-2">
+              <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">Motiv-Darstellung</label>
+              <select
+                value={motifDisplayMode}
+                onChange={(e) => setMotifDisplayMode(e.target.value as 'auto' | 'template' | 'stretched')}
+                className="w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+              >
+                <option value="auto">Automatisch (an Bild erkennen)</option>
+                <option value="template">Malvorlage (weißer Rand + Logos, ungerollt)</option>
+                <option value="stretched">Auf Keilrahmen gespannt</option>
+              </select>
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                {motifDisplayMode === 'auto' && 'KI erkennt: Weißer Rand + Logos → Malvorlage auf dem Tisch; sonst → Leinwand auf Keilrahmen.'}
+                {motifDisplayMode === 'template' && 'Motiv immer als ungerollte Malvorlage mit weißem Rand und Logos darstellen.'}
+                {motifDisplayMode === 'stretched' && 'Motiv immer als auf Keilrahmen gespannte Leinwand (Wand oder Tisch) darstellen.'}
+              </p>
+            </div>
+          )}
 
           {/* Extra Reference Images (Person, Objekte, etc.) */}
           <ExtraReferenceUpload
@@ -330,8 +459,8 @@ export default function App() {
             ) : (
               <>
                 <button
-                  onClick={handleGenerate}
-                  disabled={generating || !exportPreset}
+                  onClick={() => handlePreviewPrompt(true)}
+                  disabled={generating || !exportPreset || promptPreviewLoading}
                   className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 to-purple-700 text-sm font-bold uppercase tracking-wider disabled:opacity-40 hover:from-purple-700 hover:to-purple-800 transition-all"
                 >
                   {generating ? 'GENERATING...' : !exportPreset ? 'LOADING...' : 'GENERATE IMAGE'}
@@ -368,12 +497,14 @@ export default function App() {
             }}
           />
 
-          {/* Video Panel */}
+          {/* Video Panel - scroll into view when opened via "Generate Video" */}
           {(showVideoPanel || currentScene?.video_status !== 'none') && (
-            <VideoPanel
-              scene={currentScene}
-              onGenerate={generateVideo}
-            />
+            <div ref={videoPanelRef} className="scroll-mt-4">
+              <VideoPanel
+                scene={currentScene}
+                onGenerate={generateVideo}
+              />
+            </div>
           )}
 
           {/* Scene Gallery */}
@@ -391,7 +522,27 @@ export default function App() {
       </div>
 
       {/* Settings Modal */}
-      <ApiKeyModal open={showSettings} onClose={() => setShowSettings(false)} />
+      <ApiKeyModal open={showSettings} onClose={() => {
+        setShowSettings(false);
+        api.settings.getProviders().then(p => {
+          setImageProviderState(p.imageProvider || 'replicate');
+          setReplicateFluxVersionState((p.replicateFluxVersion === 'grok' || p.replicateFluxVersion === '2pro' || p.replicateFluxVersion === '1') ? p.replicateFluxVersion : '2pro');
+        }).catch(() => {});
+      }} />
+
+      {/* Prompt Preview Modal */}
+      <PromptPreviewModal
+        open={showPromptPreview}
+        onClose={() => {
+          setShowPromptPreview(false);
+          setPromptPreviewData(null);
+          setPendingGeneratePayload(null);
+        }}
+        data={promptPreviewData}
+        loading={promptPreviewLoading}
+        showGenerateButton={promptPreviewShowGenerate}
+        onGenerateImage={handleConfirmGenerate}
+      />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { logger } from '../services/logger.js';
 import { BUILTIN_TEMPLATES } from '../seeds/templates.js';
+import { BUILTIN_PROMPT_TAGS } from '../seeds/promptTags.js';
 
 export function initDatabase(db: Database.Database) {
   db.exec(`
@@ -39,6 +40,7 @@ export function initDatabase(db: Database.Database) {
       prompt_template TEXT,
       typical_use TEXT,
       is_builtin INTEGER DEFAULT 1,
+      preview_image_path TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -108,6 +110,16 @@ export function initDatabase(db: Database.Database) {
       is_builtin INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS prompt_tags (
+      id TEXT PRIMARY KEY,
+      category_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      order_index INTEGER DEFAULT 0,
+      is_builtin INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Migrations for existing DBs
@@ -136,6 +148,15 @@ export function initDatabase(db: Database.Database) {
     try {
       db.exec("ALTER TABLE scenes ADD COLUMN motif_image_paths TEXT");
       logger.info('db', 'Migrated: added motif_image_paths (JSON array) to scenes');
+    } catch { /* already exists */ }
+  }
+
+  try {
+    db.prepare("SELECT motif_display_mode FROM scenes LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE scenes ADD COLUMN motif_display_mode TEXT DEFAULT 'auto'");
+      logger.info('db', 'Migrated: added motif_display_mode (auto | template | stretched) to scenes');
     } catch { /* already exists */ }
   }
 
@@ -223,6 +244,16 @@ export function initDatabase(db: Database.Database) {
     } catch { /* already exists */ }
   }
 
+  // Migration: add video_prompt_generated to scenes (AI-generated video prompt for transparency)
+  try {
+    db.prepare("SELECT video_prompt_generated FROM scenes LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE scenes ADD COLUMN video_prompt_generated TEXT");
+      logger.info('db', 'Migrated: added video_prompt_generated to scenes');
+    } catch { /* already exists */ }
+  }
+
   // Migration for scene_versions table
   try {
     db.prepare("SELECT id FROM scene_versions LIMIT 1").get();
@@ -287,6 +318,49 @@ export function initDatabase(db: Database.Database) {
     }
   }
 
+  // Migration: add generation_path to render_jobs (trace which provider/path produced the image)
+  try {
+    db.prepare("SELECT generation_path FROM render_jobs LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE render_jobs ADD COLUMN generation_path TEXT");
+      logger.info('db', 'Migrated: added generation_path to render_jobs');
+    } catch { /* already exists */ }
+  }
+
+  // Migration for prompt_tags table (existing DBs created before this feature)
+  try {
+    db.prepare("SELECT id FROM prompt_tags LIMIT 1").get();
+  } catch {
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS prompt_tags (
+          id TEXT PRIMARY KEY,
+          category_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          order_index INTEGER DEFAULT 0,
+          is_builtin INTEGER DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      logger.info('db', 'Migrated: created prompt_tags table');
+    } catch (e) {
+      logger.error('db', 'Failed to create prompt_tags table', e);
+    }
+  }
+
+  // Migration: add preview_image_path to scene_templates if missing
+  try {
+    const cols = db.prepare('PRAGMA table_info(scene_templates)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'preview_image_path')) {
+      db.exec('ALTER TABLE scene_templates ADD COLUMN preview_image_path TEXT');
+      logger.info('db', 'Migrated: added preview_image_path to scene_templates');
+    }
+  } catch (e) {
+    logger.error('db', 'Migration preview_image_path failed', e);
+  }
+
   // Seed templates
   const existingCount = db.prepare('SELECT COUNT(*) as count FROM scene_templates WHERE is_builtin = 1').get() as any;
   if (existingCount.count === 0) {
@@ -305,6 +379,19 @@ export function initDatabase(db: Database.Database) {
   if (projectCount.count === 0) {
     db.prepare('INSERT INTO projects (id, name) VALUES (?, ?)').run('default', 'My First Project');
     logger.info('db', 'Seeded default project');
+  }
+
+  // Seed built-in prompt tags
+  const promptTagCount = db.prepare('SELECT COUNT(*) as count FROM prompt_tags WHERE is_builtin = 1').get() as any;
+  if (promptTagCount.count === 0) {
+    const insertTag = db.prepare(`
+      INSERT INTO prompt_tags (id, category_id, label, prompt, order_index, is_builtin)
+      VALUES (?, ?, ?, ?, ?, 1)
+    `);
+    for (const tag of BUILTIN_PROMPT_TAGS) {
+      insertTag.run(tag.id, tag.category_id, tag.label, tag.prompt, tag.order_index);
+    }
+    logger.info('db', `Seeded ${BUILTIN_PROMPT_TAGS.length} built-in prompt tags`);
   }
 
   // Seed default settings

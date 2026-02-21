@@ -242,6 +242,7 @@ You understand the physical properties of each material (size, weight, surface t
 
 CRITICAL RULES:
 - ONLY MATERIALS AND UPLOADED MOTIFS: The scene may contain ONLY (1) the exact materials listed in the user prompt and shown in the reference images, and (2) the exact motif(s) from uploaded motif images, if any. Do NOT suggest or add brushes, palettes, colored pencils, pens, or any props that are not in the provided materials list. No generic or foreign objects.
+- FRAME/PRESENTATION FROM TEMPLATE ONLY: Do NOT invent or add specific frame types (e.g. shadow gap frame, floating frame, classic frame, no shadow gap, no floating). How artworks are presented (stretched canvas, unframed, on wall, etc.) must come ONLY from the "Scene Guidance" (template) and "Style Format" (vorlage = unframed template, gerahmt = stretched on wooden frame, ausmalen = artistically painted). Use exactly the wording and style from the template; do not add your own frame descriptions.
 - MATERIAL FIDELITY IS NON-NEGOTIABLE: The generated image must show the EXACT materials provided in the reference images. Do NOT simplify, stylize, or replace them with generic versions.
 - CORRECT RELATIVE SCALE: You MUST respect the provided dimensions. Compare the sizes of all objects (e.g., a 2cm paint pot is tiny compared to a 60cm canvas). Small items should look small, and large items should dominate the scene when appropriate.
 - PROPORTIONAL ARRANGEMENT: When placing objects together (e.g., paint pots on a canvas), ensure the footprint of the smaller object matches its real-world dimensions relative to the larger one.
@@ -297,33 +298,80 @@ export const TAG_PROMPTS: Record<string, string> = {
   'tag-partially-unpainted': 'The canvas is currently being painted. Parts of the canvas are already filled with vibrant acrylic paint, while other sections are still in their raw "paint-by-numbers" template state, showing only the grey outlines and tiny printed numbers clearly visible. This creates a "work in progress" look.',
 };
 
+/** When using FLUX 2 Pro with 8-slot order: Blueprint, ExtraRefs, Motifs, Materials. Used for explicit index instructions. */
+export type Flux2ProRefIndices = { blueprintCount: number; extraRefCount: number; motifCount: number };
+
 export function buildImageGenerationPrompt(
   enrichedPrompt: string,
   materials: MaterialData[],
   hasMotifImage: boolean = false,
   aspectRatio?: string,
-  promptTags: string[] = []
+  promptTags: string[] = [],
+  tagPromptsMap?: Record<string, string>,
+  flux2ProRefIndices?: Flux2ProRefIndices,
+  motifAspectRatios?: string[],
+  /** When true, blueprint is a painting template (Malvorlage): keep logos/numbers, show motif only in numbered areas. */
+  paintingTemplateWithMotif?: boolean,
+  /** How to present motif images: auto = infer from image (white edge+logos = template, else stretched); template = unrolled; stretched = on Keilrahmen. */
+  motifDisplayMode?: 'auto' | 'template' | 'stretched'
 ): string {
   const refInstructions = buildReferenceImageInstructions(materials, hasMotifImage);
+  const tagMap = tagPromptsMap ?? TAG_PROMPTS;
 
+  let indexSection = '';
+  if (flux2ProRefIndices && (flux2ProRefIndices.blueprintCount > 0 || flux2ProRefIndices.extraRefCount > 0 || flux2ProRefIndices.motifCount > 0)) {
+    const { blueprintCount, extraRefCount, motifCount } = flux2ProRefIndices;
+    let idx = 1;
+    const parts: string[] = [];
+    if (blueprintCount > 0) {
+      const blueprintHint = motifCount > 0
+        ? ' It is a PAINTING TEMPLATE (Malvorlage). Keep the full template visible: logos, branding, numbers, outlines. In the NUMBERED AREAS ONLY, show the user\'s motif(s) (half-painted or fully painted). Do not replace or remove the template.'
+        : '';
+      parts.push(`Image ${idx} = composition blueprint${motifCount > 0 ? ' (painting template)' : ''}${blueprintHint}`);
+      idx += blueprintCount;
+    }
+    if (extraRefCount > 0) {
+      const range = extraRefCount === 1 ? `Image ${idx}` : `Images ${idx}-${idx + extraRefCount - 1}`;
+      parts.push(`${range} = reference person(s)/object(s) to include in the scene`);
+      idx += extraRefCount;
+    }
+    if (motifCount > 0) {
+      const range = motifCount === 1 ? `Image ${idx}` : `Images ${idx}-${idx + motifCount - 1}`;
+      const formatHint = motifAspectRatios?.length ? ` Format (MUST preserve 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.` : '';
+      parts.push(`${range} = motif canvases – reproduce exactly, same aspect ratio and content; do not add, duplicate, or alter.${formatHint}`);
+      idx += motifCount;
+    }
+    if (idx <= 8) parts.push(`Images ${idx}-8 = material reference images`);
+    indexSection = `\n\nREFERENCE IMAGE INDEX (use exactly as provided): ${parts.join('. ')}. Reproduce the content of each reference image faithfully. Do not add, remove, or alter elements that are not in the reference images. Do not duplicate or change the aspect ratio of motif images.\n`;
+  }
+
+  const isPaintingTemplateWithMotif = paintingTemplateWithMotif ?? !!(flux2ProRefIndices && flux2ProRefIndices.blueprintCount > 0 && flux2ProRefIndices.motifCount > 0);
   let motifSection = '';
   if (hasMotifImage) {
-    motifSection = `\n\nCANVAS MOTIF IMAGES (STRICT – ONLY THESE):
-The LAST reference images (one or more) are the ONLY motifs the user has uploaded. You MUST use ONLY these.
-- ONLY these uploaded motif images may appear as canvas/print graphics in the scene. Do NOT add any other motifs, illustrations, or graphics that were not uploaded.
-- Show ALL uploaded motif images (e.g. on canvases or as templates). Maintain each motif's composition, colors, and subject matter faithfully.
-- CRITICAL – MOTIF FORMAT MUST NEVER BE CHANGED: Preserve each motif's exact aspect ratio and proportions. Do NOT stretch, crop, distort, or alter the dimensions of any motif. Each motif must appear exactly as provided.
-- Each motif should be rendered as if printed/painted on a canvas or template with typical paint-by-numbers texture and style.
-- Do not invent or add any motif that is not in the provided motif reference images.`;
+    const formatBlock = motifAspectRatios?.length
+      ? `\n- MOTIF FORMATS (MANDATORY – 100% preserve): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = aspect ratio ${ar}`).join('; ')}. Each motif must be displayed in exactly this aspect ratio – no stretching, cropping, or distortion.`
+      : '';
+    const canvasInstruction = isPaintingTemplateWithMotif
+      ? `- PAINTING TEMPLATE (first reference image): The blueprint is a painting template (Malvorlage) with numbered areas and possibly logos/branding. Do NOT replace the whole template. Keep the entire template visible: all logos, numbers, outlines, and layout. Show the user's uploaded motif(s) ONLY inside the NUMBERED AREAS – either half-painted or fully painted – so the motif content appears in those regions. The template structure and logos must remain; only the numbered zones show the motif.`
+      : `- REPLACE ANY EXISTING CANVAS IN THE REFERENCE: If the composition blueprint or any reference image already shows a canvas (or picture/frame on the wall), that canvas content must be REPLACED by the user's uploaded motif image(s). Do NOT keep the original artwork that appears on the canvas in the reference – the user's motif REPLACES it. The motif is displayed as a canvas, in its correct size and aspect ratio – never stretched, stuffed, cropped, or distorted.`;
+    motifSection = `\n\nCANVAS MOTIF IMAGES (STRICT – NO HALLUCINATION):
+The LAST reference image(s) are the user's uploaded artwork. You MUST show these EXACT images – not a variation, not an interpretation, not new artwork.
+${canvasInstruction}
+- The artwork (or motif in numbered areas) must be a faithful reproduction of those uploaded motif image(s): same subject, same colors, same composition, same details. Do NOT re-draw or re-invent.
+- ONLY these uploaded motif images may appear as canvas/motif graphics. Do NOT add any other motifs; preserve any logos and structure from the painting template when used. Do NOT generate new artwork; display the exact motif image content where required.
+- Preserve each motif's exact aspect ratio and proportions; do not stretch, crop, or distort. Each motif appears exactly once, identical in content to its reference image.${formatBlock}
+- MOTIF PRESENTATION: ${motifDisplayMode === 'template' ? 'Display the motif(s) as an UNROLLED painting template (Malvorlage) on the table – white edge and logos visible, NOT stretched on a frame.' : motifDisplayMode === 'stretched' ? 'Display the motif(s) as a STRETCHED CANVAS on a Keilrahmen (on the wall or table as appropriate).' : 'Look at each motif reference: if it has a WHITE BORDER/EDGE with LOGOS, render as UNROLLED Malvorlage on the table (white edge and logos visible). If no white border, render as STRETCHED CANVAS on a Keilrahmen.'}
+- Render each motif as the finished artwork (content = exact copy of the reference). Use paint-by-numbers texture only if the scene description explicitly requests it.
+- CRITICAL: If you cannot reproduce the motif pixel-accurately, still do not substitute a different image – keep the same subject and composition as in the reference.`;
   }
 
   const tagPrompts = promptTags
-    .map(id => TAG_PROMPTS[id])
+    .map(id => tagMap[id])
     .filter(Boolean)
     .map(p => `- ${p}`)
     .join('\n');
 
-  const tagSection = tagPrompts ? `\n\nSCENE ELEMENTS & REQUIREMENTS:\n${tagPrompts}` : '';
+  const tagSection = tagPrompts ? `\n\nSCENE ELEMENTS (selected use case):\n${tagPrompts}` : '';
 
   const scaleContext = buildScaleContext(materials);
   const scaleSection = scaleContext ? `\n\n${scaleContext}` : '';
@@ -332,20 +380,24 @@ The LAST reference images (one or more) are the ONLY motifs the user has uploade
     ? `\n\nIMPORTANT: The target aspect ratio for this image is ${aspectRatio}. Ensure the composition is optimized for this format.`
     : '';
 
+  const refBlock = refInstructions.trim()
+    ? refInstructions.trim()
+    : 'Use the reference images in order: material references first, then motif images (last). Reproduce each faithfully; do not add, duplicate, or alter content.';
+
   return `STRICT SOURCE RULE – ONLY USE PROVIDED SOURCES:
 Only the following may appear in this image:
-1. The exact materials shown in the reference images (by the material list). Reproduce only those materials – no generic brushes, palettes, colored pencils, pens, or other objects that are not in the reference images.
-2. The exact motif(s) from the uploaded motif images (the last reference image(s)), if any. No other graphics or motifs.
-Do NOT add any object, prop, or graphic that is not in the provided reference images or uploaded motifs. No foreign or generic items.
-
+1. The exact materials shown in the reference images (by the material list). No generic brushes, palettes, pencils, pens, or other objects not in the reference images.
+2. The exact motif(s) from the uploaded motif images (the last reference image(s)), if any. The canvas must show these exact images – do NOT hallucinate or invent different artwork.
+Do NOT add any object, prop, or graphic that is not in the provided reference images or uploaded motifs. Preserve motif aspect ratios; each motif exactly once, same content and proportions as in its reference image. Canvas artwork = exact copy of the last reference image(s); no variations.
+${indexSection}
 Generate a photorealistic product photograph based on this description:
 
 ${enrichedPrompt}
 
 REFERENCE IMAGE HANDLING:
-${refInstructions}${motifSection}${tagSection}${scaleSection}${arInstruction}
+${refBlock}${motifSection}${tagSection}${scaleSection}${arInstruction}
 
-Maintain correct physical proportions and surface properties for all materials. The result must look like a professional product photograph.
+Reminder: Preserve motif aspect ratios; only use provided sources; no adding or duplicating. Maintain correct physical proportions. The result must look like a professional product photograph.
 
 CRITICAL: Do not add any text, writing, labels, numbers, or letters onto the image unless explicitly requested in the description above. If no text is requested, the image must contain NO visible text or writing.`;
 }

@@ -34,6 +34,17 @@ export interface SceneTemplate {
   prompt_template: string;
   typical_use: string;
   is_builtin: number;
+  /** Optional preview image path (e.g. from a generated scene); shown on hover in template picker. */
+  preview_image_path?: string | null;
+}
+
+export interface PromptTag {
+  id: string;
+  category_id: string;
+  label: string;
+  prompt: string;
+  order_index: number;
+  is_builtin: number;
 }
 
 export interface VerificationIssue {
@@ -61,6 +72,8 @@ export interface Scene {
   motif_image_path?: string;
   /** JSON array of motif image paths when multiple are uploaded (max 4). */
   motif_image_paths?: string | null;
+  /** How to present motif: auto = infer from image (white edge+logos = template); template = unrolled; stretched = on Keilrahmen. */
+  motif_display_mode?: 'auto' | 'template' | 'stretched' | null;
   /** JSON array of extra reference image paths (person, objects, etc.). */
   extra_reference_paths?: string | null;
   image_path?: string;
@@ -70,6 +83,8 @@ export interface Scene {
   video_duration: number;
   video_path?: string;
   video_status: 'none' | 'generating' | 'done' | 'failed';
+  /** AI-generated video prompt used for the last video generation (for transparency). */
+  video_prompt_generated?: string | null;
   review_notes?: string | null;
   review_rating?: number | null;
   last_refinement_prompt?: string | null;

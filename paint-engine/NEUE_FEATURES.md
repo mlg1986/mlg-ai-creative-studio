@@ -117,6 +117,15 @@ Speziell für die Darstellung neuer Motive und Vernissage-Präsentationen wurden
 
 ## 📝 Changelog
 
+**Version 1.2.0 – Motiv-Format & Canvas-Ersetzung (2026-02-20)**
+
+**Added:**
+- Motivformate (Aspect Ratios) werden aus den Bilddateien gelesen und bei der Prompt-Generierung (Preview, Generierung, Refinement) mit übergeben – Motivdarstellung im richtigen Format, ohne Stretching/Verzerrung.
+- Wenn das Referenzfoto (Blueprint) bereits eine Leinwand zeigt, wird diese explizit durch das hochgeladene Motiv **ersetzt**; das Motiv wird als Leinwand in korrektem Seitenverhältnis dargestellt.
+- Doku: `MOTIV_FORMAT_UND_CANVAS_ERSETZUNG.md` und `CHANGELOG.md`.
+
+---
+
 **Version: Material Verification & Extended Templates**
 
 **Added:**
