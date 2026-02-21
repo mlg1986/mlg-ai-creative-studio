@@ -44,6 +44,8 @@ export function useScene() {
     blueprintImagePath?: string;
     motifImagePath?: string;
     motifImagePaths?: string[];
+    extraReferencePaths?: string[];
+    motifDisplayMode?: 'auto' | 'template' | 'stretched';
   }) => {
     setGenerating(true);
     try {
@@ -125,7 +127,9 @@ export function useScene() {
           }
         } catch { /* keep polling */ }
       }, 5000);
-    } catch { /* toast shown */ }
+    } catch {
+      setCurrentScene(prev => prev ? { ...prev, video_status: 'failed' as const } : null);
+    }
   }, [currentScene]);
 
   const generateVariant = useCallback(async (sceneId: string, exportPreset: string) => {

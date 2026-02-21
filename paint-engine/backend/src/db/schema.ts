@@ -152,6 +152,15 @@ export function initDatabase(db: Database.Database) {
   }
 
   try {
+    db.prepare("SELECT motif_display_mode FROM scenes LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE scenes ADD COLUMN motif_display_mode TEXT DEFAULT 'auto'");
+      logger.info('db', 'Migrated: added motif_display_mode (auto | template | stretched) to scenes');
+    } catch { /* already exists */ }
+  }
+
+  try {
     db.prepare("SELECT prompt_tags FROM scenes LIMIT 1").get();
   } catch {
     try {
@@ -232,6 +241,16 @@ export function initDatabase(db: Database.Database) {
     try {
       db.exec("ALTER TABLE scenes ADD COLUMN extra_reference_paths TEXT");
       logger.info('db', 'Migrated: added extra_reference_paths (JSON array) to scenes');
+    } catch { /* already exists */ }
+  }
+
+  // Migration: add video_prompt_generated to scenes (AI-generated video prompt for transparency)
+  try {
+    db.prepare("SELECT video_prompt_generated FROM scenes LIMIT 1").get();
+  } catch {
+    try {
+      db.exec("ALTER TABLE scenes ADD COLUMN video_prompt_generated TEXT");
+      logger.info('db', 'Migrated: added video_prompt_generated to scenes');
     } catch { /* already exists */ }
   }
 

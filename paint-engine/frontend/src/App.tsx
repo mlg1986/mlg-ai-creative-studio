@@ -37,10 +37,12 @@ export default function App() {
   const [exportPreset, setExportPreset] = useState('');
   const [blueprintPath, setBlueprintPath] = useState<string | null>(null);
   const [motifPaths, setMotifPaths] = useState<string[]>([]);
+  const [motifDisplayMode, setMotifDisplayMode] = useState<'auto' | 'template' | 'stretched'>('auto');
   const [extraReferencePaths, setExtraReferencePaths] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showVideoPanel, setShowVideoPanel] = useState(false);
+  const videoPanelRef = useRef<HTMLDivElement>(null);
   const [sceneMaterialIds, setSceneMaterialIds] = useState<string[]>([]);
   const [savingScene, setSavingScene] = useState(false);
   const [showPromptPreview, setShowPromptPreview] = useState(false);
@@ -75,6 +77,13 @@ export default function App() {
   useEffect(() => {
     refreshPromptTags();
   }, []);
+
+  // Scroll Video Panel into view when user opens it via "Generate Video"
+  useEffect(() => {
+    if (showVideoPanel && videoPanelRef.current) {
+      videoPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [showVideoPanel]);
 
   // Set default export preset to Instagram Story (9:16) when presets are loaded
   useEffect(() => {
@@ -117,6 +126,8 @@ export default function App() {
       paths = [currentScene.motif_image_path];
     }
     setMotifPaths(paths);
+    const mode = currentScene.motif_display_mode;
+    setMotifDisplayMode((mode === 'template' || mode === 'stretched') ? mode : 'auto');
     let extraRefParsed: string[] = [];
     if (currentScene.extra_reference_paths) {
       try {
@@ -174,6 +185,7 @@ export default function App() {
         export_preset: exportPreset || null,
         blueprint_image_path: blueprintPath || null,
         motif_image_paths: motifPaths.length > 0 ? motifPaths : null,
+        motif_display_mode: motifDisplayMode,
         extra_reference_paths: extraReferencePaths.length > 0 ? extraReferencePaths : null,
         materialIds: sceneMaterialIds,
       });
@@ -208,6 +220,7 @@ export default function App() {
       blueprintImagePath: blueprintPath || undefined,
       motifImagePaths: motifPaths.length ? motifPaths : undefined,
       extraReferencePaths: extraReferencePaths.length ? extraReferencePaths : undefined,
+      motifDisplayMode: motifDisplayMode !== 'auto' ? motifDisplayMode : undefined,
     };
   }
 
@@ -377,6 +390,25 @@ export default function App() {
             onChange={setMotifPaths}
             visible={true}
           />
+          {motifPaths.length > 0 && (
+            <div className="mb-2">
+              <label className="block text-[10px] uppercase tracking-wider text-gray-500 mb-1">Motiv-Darstellung</label>
+              <select
+                value={motifDisplayMode}
+                onChange={(e) => setMotifDisplayMode(e.target.value as 'auto' | 'template' | 'stretched')}
+                className="w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+              >
+                <option value="auto">Automatisch (an Bild erkennen)</option>
+                <option value="template">Malvorlage (weißer Rand + Logos, ungerollt)</option>
+                <option value="stretched">Auf Keilrahmen gespannt</option>
+              </select>
+              <p className="text-[10px] text-gray-500 mt-0.5">
+                {motifDisplayMode === 'auto' && 'KI erkennt: Weißer Rand + Logos → Malvorlage auf dem Tisch; sonst → Leinwand auf Keilrahmen.'}
+                {motifDisplayMode === 'template' && 'Motiv immer als ungerollte Malvorlage mit weißem Rand und Logos darstellen.'}
+                {motifDisplayMode === 'stretched' && 'Motiv immer als auf Keilrahmen gespannte Leinwand (Wand oder Tisch) darstellen.'}
+              </p>
+            </div>
+          )}
 
           {/* Extra Reference Images (Person, Objekte, etc.) */}
           <ExtraReferenceUpload
@@ -465,12 +497,14 @@ export default function App() {
             }}
           />
 
-          {/* Video Panel */}
+          {/* Video Panel - scroll into view when opened via "Generate Video" */}
           {(showVideoPanel || currentScene?.video_status !== 'none') && (
-            <VideoPanel
-              scene={currentScene}
-              onGenerate={generateVideo}
-            />
+            <div ref={videoPanelRef} className="scroll-mt-4">
+              <VideoPanel
+                scene={currentScene}
+                onGenerate={generateVideo}
+              />
+            </div>
           )}
 
           {/* Scene Gallery */}

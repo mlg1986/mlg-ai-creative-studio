@@ -136,6 +136,7 @@ export const api = {
       motifImagePath?: string;
       motifImagePaths?: string[];
       extraReferencePaths?: string[];
+      motifDisplayMode?: 'auto' | 'template' | 'stretched';
     }) => apiFetch<{ enrichedPrompt: string; imagePrompt: string }>('/scenes/preview-prompt', {
       method: 'POST', body: JSON.stringify(data),
     }),
@@ -152,6 +153,7 @@ export const api = {
       motif_image_path?: string | null;
       motif_image_paths?: string[] | null;
       extra_reference_paths?: string[] | null;
+      motif_display_mode?: 'auto' | 'template' | 'stretched' | null;
       materialIds?: string[];
     }) => apiFetch<Scene>(`/scenes/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: string) => apiFetch<{ success: boolean }>(`/scenes/${id}`, { method: 'DELETE' }),
@@ -175,7 +177,20 @@ export const api = {
     generateVideo: (sceneId: string, data: any) => apiFetch<any>(`/scenes/${sceneId}/video`, {
       method: 'POST', body: JSON.stringify(data),
     }),
-    videoStatus: (sceneId: string) => apiFetch<any>(`/scenes/${sceneId}/video/status`),
+    /** Generate video prompt only (no job). Returns { videoPrompt }. */
+    previewVideoPrompt: (sceneId: string, data: { videoStyle?: string; videoPrompt?: string }) =>
+      apiFetch<{ videoPrompt: string }>(`/scenes/${sceneId}/video/preview-prompt`, {
+        method: 'POST',
+        body: JSON.stringify({ videoStyle: data.videoStyle || 'cinematic', videoPrompt: data.videoPrompt || null }),
+      }),
+    videoStatus: (sceneId: string) => apiFetch<{
+      video_status: string;
+      video_path?: string;
+      video_style?: string;
+      video_duration?: number;
+      video_prompt_generated?: string;
+      job: any;
+    }>(`/scenes/${sceneId}/video/status`),
     createVariant: (sceneId: string, exportPreset: string) => apiFetch<{ id: string; image_status: string }>(`/scenes/${sceneId}/variant`, {
       method: 'POST', body: JSON.stringify({ exportPreset }),
     }),
@@ -217,10 +232,24 @@ export const api = {
     setOpenAIKey: (apiKey: string) => apiFetch<{ success: boolean }>('/settings/openai-api-key', {
       method: 'PUT', body: JSON.stringify({ apiKey }),
     }),
-    getProviders: () => apiFetch<{ imageProvider: string; videoProvider: string; replicateFluxVersion?: string; availableImageProviders: string[] }>('/settings/providers'),
+    getXaiKeyStatus: () => apiFetch<{ hasApiKey: boolean; source: string }>('/settings/xai-api-key'),
+    setXaiKey: (apiKey: string) => apiFetch<{ success: boolean }>('/settings/xai-api-key', {
+      method: 'PUT', body: JSON.stringify({ apiKey }),
+    }),
+    getProviders: () => apiFetch<{
+      imageProvider: string;
+      videoProvider: string;
+      replicateFluxVersion?: string;
+      availableImageProviders: string[];
+      availableVideoProviders: { id: string; label: string; costPerSecond: number }[];
+    }>('/settings/providers'),
     setImageProvider: (provider: string, replicateFluxVersion?: string) => apiFetch<{ success: boolean }>('/settings/providers', {
       method: 'PUT',
       body: JSON.stringify(replicateFluxVersion !== undefined ? { imageProvider: provider, replicateFluxVersion } : { imageProvider: provider }),
+    }),
+    setVideoProvider: (provider: string) => apiFetch<{ success: boolean }>('/settings/providers', {
+      method: 'PUT',
+      body: JSON.stringify({ videoProvider: provider }),
     }),
     getLoraConfig: () => apiFetch<{ loraUrl: string; loraTriggerWord: string; loraScale: number }>('/settings/lora'),
     setLoraConfig: (config: { loraUrl?: string; loraTriggerWord?: string; loraScale?: number }) =>

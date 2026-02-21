@@ -5,6 +5,7 @@ import { asyncHandler } from '../middleware/asyncHandler.js';
 import { logger } from '../services/logger.js';
 import { getPromptEnricherKeys } from '../services/promptEnricher.js';
 import { GoogleProvider } from '../services/providers/google.js';
+import { AVAILABLE_VIDEO_PROVIDERS, VIDEO_PROVIDER_IDS } from '../config/videoProviders.js';
 
 export function createSettingsRouter(db: Database.Database) {
   const router = Router();
@@ -58,6 +59,27 @@ export function createSettingsRouter(db: Database.Database) {
       hasApiKey: !!(row?.value || (envKey && envKey !== 'your-api-key-here')),
       source: row?.value ? 'database' : envKey ? 'environment' : 'none',
     });
+  }));
+
+  router.get('/xai-api-key', asyncHandler(async (_req, res) => {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'xai_api_key'").get() as any;
+    const envKey = process.env.XAI_API_KEY;
+    res.json({
+      hasApiKey: !!(row?.value || envKey),
+      source: row?.value ? 'database' : envKey ? 'environment' : 'none',
+    });
+  }));
+
+  router.put('/xai-api-key', asyncHandler(async (req, res) => {
+    const { apiKey } = req.body;
+    if (!apiKey?.trim()) {
+      db.prepare("DELETE FROM settings WHERE key = 'xai_api_key'").run();
+      logger.info('settings', 'xAI API key removed');
+    } else {
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('xai_api_key', ?)").run(apiKey.trim());
+      logger.info('settings', 'xAI API key updated');
+    }
+    res.json({ success: true });
   }));
 
   const GEMINI_PLACEHOLDER = 'your-api-key-here';
@@ -165,16 +187,22 @@ export function createSettingsRouter(db: Database.Database) {
     const videoProvider = (db.prepare("SELECT value FROM settings WHERE key = 'video_provider'").get() as any)?.value || 'veo';
     const rawFlux = (db.prepare("SELECT value FROM settings WHERE key = 'replicate_flux_version'").get() as any)?.value;
     const replicateFluxVersion = (rawFlux === 'grok' || rawFlux === '2pro' || rawFlux === '1') ? rawFlux : '2pro';
+    const availableVideoProviders = AVAILABLE_VIDEO_PROVIDERS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      costPerSecond: p.costPerSecond,
+    }));
     res.json({
       imageProvider,
       videoProvider,
       replicateFluxVersion,
       availableImageProviders: ['gemini', 'replicate'],
+      availableVideoProviders,
     });
   }));
 
   router.put('/providers', asyncHandler(async (req, res) => {
-    const { imageProvider, replicateFluxVersion } = req.body;
+    const { imageProvider, replicateFluxVersion, videoProvider: videoProviderBody } = req.body;
     const allowed = ['gemini', 'replicate'];
     if (imageProvider !== undefined) {
       const v = typeof imageProvider === 'string' ? imageProvider.trim() : '';
@@ -191,6 +219,14 @@ export function createSettingsRouter(db: Database.Database) {
       }
       db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('replicate_flux_version', ?)").run(fluxVal);
       logger.info('settings', `replicate_flux_version set to ${fluxVal}`);
+    }
+    if (videoProviderBody !== undefined) {
+      const v = typeof videoProviderBody === 'string' ? videoProviderBody.trim() : '';
+      if (!VIDEO_PROVIDER_IDS.includes(v)) {
+        return res.status(400).json({ error: `videoProvider must be one of: ${VIDEO_PROVIDER_IDS.join(', ')}` });
+      }
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('video_provider', ?)").run(v);
+      logger.info('settings', `video_provider set to ${v}`);
     }
     res.json({ success: true });
   }));

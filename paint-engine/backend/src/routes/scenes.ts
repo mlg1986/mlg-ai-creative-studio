@@ -13,6 +13,7 @@ import { getPromptEnricher } from '../services/promptEnricher.js';
 import { verificationService } from '../services/verificationService.js';
 import { patternMemory } from '../services/patternMemory.js';
 import { composeMotifsOntoBackground } from '../services/compositingService.js';
+import { detectMotifDisplayModeFromPaths } from '../services/motifClassifier.js';
 import {
   buildSceneMaterialContext,
   buildMaterialRestrictionPrompt,
@@ -282,7 +283,7 @@ export function createScenesRouter(db: Database.Database) {
   // POST preview-prompt – build enriched + image prompt for display (no scene created, no image generated)
   router.post('/preview-prompt', asyncHandler(async (req, res) => {
     validateSceneCreate(req.body, db);
-    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths } = req.body;
+    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths, motifDisplayMode } = req.body;
     const safeMaterialIds: string[] = Array.isArray(materialIds) ? materialIds : [];
     const motifPaths: string[] = Array.isArray(motifImagePaths) && motifImagePaths.length
       ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES)
@@ -319,6 +320,10 @@ export function createScenesRouter(db: Database.Database) {
     }
     const enricher = getScenePromptEnricher(db);
 
+    let motifDisplay: 'auto' | 'template' | 'stretched' = (motifDisplayMode === 'template' || motifDisplayMode === 'stretched') ? motifDisplayMode : 'auto';
+    if (motifDisplay === 'auto' && motifPaths.length > 0) {
+      motifDisplay = await detectMotifDisplayModeFromPaths(resolveMotifFullPath, motifPaths);
+    }
     const { enrichedPrompt, imagePrompt } = await buildPromptsForScene(
       db,
       enricher,
@@ -330,7 +335,8 @@ export function createScenesRouter(db: Database.Database) {
       blueprintImagePath || null,
       motifPaths,
       promptTagsArr,
-      extraRefPaths
+      extraRefPaths,
+      motifDisplay
     );
     res.json({ enrichedPrompt, imagePrompt });
   }));
@@ -376,6 +382,7 @@ export function createScenesRouter(db: Database.Database) {
       motif_image_path,
       motif_image_paths,
       extra_reference_paths,
+      motif_display_mode,
       materialIds,
     } = req.body;
 
@@ -441,6 +448,11 @@ export function createScenesRouter(db: Database.Database) {
           ? (extra_reference_paths.length ? JSON.stringify(extra_reference_paths) : null)
           : extra_reference_paths === '' ? null : extra_reference_paths
       );
+    }
+    if (motif_display_mode !== undefined) {
+      const valid = ['auto', 'template', 'stretched'].includes(String(motif_display_mode));
+      updates.push('motif_display_mode = ?');
+      values.push(valid ? motif_display_mode : 'auto');
     }
 
     if (updates.length > 0) {
@@ -742,7 +754,7 @@ export function createScenesRouter(db: Database.Database) {
   router.post('/', asyncHandler(async (req, res) => {
     validateSceneCreate(req.body, db);
 
-    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths } = req.body;
+    const { projectId, templateId, sceneDescription, materialIds = [], format, exportPreset, promptTags, blueprintImagePath, motifImagePath, motifImagePaths, extraReferencePaths, motifDisplayMode } = req.body;
     const safeMaterialIds: string[] = Array.isArray(materialIds) ? materialIds : [];
     const motifPaths: string[] = Array.isArray(motifImagePaths) && motifImagePaths.length
       ? motifImagePaths.slice(0, MAX_REFERENCE_IMAGES)
@@ -788,15 +800,19 @@ export function createScenesRouter(db: Database.Database) {
     const motifPathSingle = motifPaths[0] || null;
     const promptTagsJson = Array.isArray(promptTags) ? JSON.stringify(promptTags) : null;
     const extraRefPathsJson = extraRefPaths.length ? JSON.stringify(extraRefPaths) : null;
+    let motifDisplay: 'auto' | 'template' | 'stretched' = (motifDisplayMode === 'template' || motifDisplayMode === 'stretched') ? motifDisplayMode : 'auto';
+    if (motifDisplay === 'auto' && motifPaths.length > 0) {
+      motifDisplay = await detectMotifDisplayModeFromPaths(resolveMotifFullPath, motifPaths);
+    }
     const presetRow = db.prepare('SELECT width, height FROM export_presets WHERE id = ?').get(exportPreset || 'free') as { width: number; height: number } | undefined;
     const targetWidth = presetRow?.width ?? null;
     const targetHeight = presetRow?.height ?? null;
     db.prepare(`
-      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, prompt_tags, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, image_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
+      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, prompt_tags, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, motif_display_mode, image_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
     `).run(sceneId, pid, `Scene ${orderIndex + 1}`, orderIndex + 1, templateId || null,
       sceneDescription || null, promptTagsJson, format || null, exportPreset || 'free', targetWidth, targetHeight, blueprintImagePath || null,
-      motifPathSingle, motifPathsJson, extraRefPathsJson);
+      motifPathSingle, motifPathsJson, extraRefPathsJson, motifDisplay);
 
     // Link materials (if any were selected)
     const insertMat = db.prepare('INSERT INTO scene_materials (scene_id, material_id) VALUES (?, ?)');
@@ -819,7 +835,7 @@ export function createScenesRouter(db: Database.Database) {
     });
 
     // Background generation
-    generateImage(db, sceneId, jobId, materials, template, sceneDescription, format, exportPreset, blueprintImagePath, motifPaths, promptTags, extraRefPaths).catch(err => {
+    generateImage(db, sceneId, jobId, materials, template, sceneDescription, format, exportPreset, blueprintImagePath, motifPaths, promptTags, extraRefPaths, { motifDisplayMode: motifDisplay }).catch(err => {
       logger.error('scenes', `Background image generation failed for scene ${sceneId}`, { error: err?.message });
       markSceneGenerationFailed(db, sceneId, jobId, err);
     });
@@ -867,7 +883,11 @@ export function createScenesRouter(db: Database.Database) {
     const motifPaths = getMotifPathsFromScene(scene);
     const extraRefPaths = getExtraRefPathsFromScene(scene);
     const promptTags = scene.prompt_tags ? JSON.parse(scene.prompt_tags) : [];
-    generateImage(db, scene.id, jobId, Array.from(materialMap.values()), template, scene.scene_description, scene.format, scene.export_preset, scene.blueprint_image_path, motifPaths, promptTags, extraRefPaths).catch(err => {
+    let motifDisplay: 'auto' | 'template' | 'stretched' = (scene.motif_display_mode === 'template' || scene.motif_display_mode === 'stretched') ? scene.motif_display_mode : 'auto';
+    if (motifDisplay === 'auto' && motifPaths.length > 0) {
+      motifDisplay = await detectMotifDisplayModeFromPaths(resolveMotifFullPath, motifPaths);
+    }
+    generateImage(db, scene.id, jobId, Array.from(materialMap.values()), template, scene.scene_description, scene.format, scene.export_preset, scene.blueprint_image_path, motifPaths, promptTags, extraRefPaths, { motifDisplayMode: motifDisplay }).catch(err => {
       logger.error('scenes', `Regeneration failed for scene ${scene.id}`, { error: err?.message });
       markSceneGenerationFailed(db, scene.id, jobId, err);
     });
@@ -922,15 +942,16 @@ export function createScenesRouter(db: Database.Database) {
     const variantMotifPathsJson = variantMotifPaths.length ? JSON.stringify(variantMotifPaths) : null;
     const variantExtraRefPaths = getExtraRefPathsFromScene(sourceScene);
     const variantExtraRefPathsJson = variantExtraRefPaths.length ? JSON.stringify(variantExtraRefPaths) : null;
+    const variantMotifDisplay = (sourceScene.motif_display_mode === 'template' || sourceScene.motif_display_mode === 'stretched') ? sourceScene.motif_display_mode : 'auto';
     const variantTargetWidth = presetInfo?.width ?? null;
     const variantTargetHeight = presetInfo?.height ?? null;
     db.prepare(`
-      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, enriched_prompt, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, image_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
+      INSERT INTO scenes (id, project_id, name, order_index, template_id, scene_description, enriched_prompt, format, export_preset, target_width, target_height, blueprint_image_path, motif_image_path, motif_image_paths, extra_reference_paths, motif_display_mode, image_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generating')
     `).run(sceneId, sourceScene.project_id, variantName, orderIndex + 1,
       sourceScene.template_id || null, sourceScene.scene_description || null,
       sourceScene.enriched_prompt, sourceScene.format || null, exportPreset,
-      variantTargetWidth, variantTargetHeight, sourceScene.blueprint_image_path || null, variantMotifPaths[0] || null, variantMotifPathsJson, variantExtraRefPathsJson);
+      variantTargetWidth, variantTargetHeight, sourceScene.blueprint_image_path || null, variantMotifPaths[0] || null, variantMotifPathsJson, variantExtraRefPathsJson, variantMotifDisplay);
 
     // Link same materials
     const insertMat = db.prepare('INSERT INTO scene_materials (scene_id, material_id) VALUES (?, ?)');
@@ -1048,6 +1069,20 @@ ${scene.enriched_prompt?.slice(0, 800)}`;
 /** Options for generateImage. When existingEnrichedPrompt is set, Scene Intelligence is skipped (format variant flow). */
 interface GenerateImageOptions {
   existingEnrichedPrompt?: string | null;
+  motifDisplayMode?: MotifDisplayMode;
+}
+
+/** motif_display_mode: how to present uploaded motif images (auto = infer from image; template = unrolled with white edge; stretched = on Keilrahmen). */
+export type MotifDisplayMode = 'auto' | 'template' | 'stretched';
+
+function getMotifPresentationHint(mode: MotifDisplayMode): string {
+  if (mode === 'template') {
+    return ' MOTIF PRESENTATION: Display the uploaded motif(s) as an UNROLLED painting template (Malvorlage) on the table – with white edge and logos visible, NOT stretched on a frame.';
+  }
+  if (mode === 'stretched') {
+    return ' MOTIF PRESENTATION: Display the uploaded motif(s) as a STRETCHED CANVAS on a Keilrahmen (on the wall or table as appropriate).';
+  }
+  return ' MOTIF PRESENTATION: Look at each uploaded motif reference image. If the image shows a WHITE BORDER/EDGE with LOGOS (a painting template / Malvorlage laid flat), render it as an UNROLLED painting template on the table – white edge and logos visible, NOT stretched on a frame. If the image has NO white border (just the artwork), render it as a STRETCHED CANVAS on a Keilrahmen (on wall or table).';
 }
 
 /** Build enriched prompt and full image prompt for preview (no DB write, no image generation). */
@@ -1062,7 +1097,8 @@ async function buildPromptsForScene(
   blueprintImagePath: string | null,
   motifPaths: string[],
   promptTags: string[],
-  extraRefImagePaths: string[]
+  extraRefImagePaths: string[],
+  motifDisplayMode: MotifDisplayMode = 'auto'
 ): Promise<{ enrichedPrompt: string; imagePrompt: string }> {
   const activeMaterials = materials.filter((m: any) => m.status !== 'idle');
   const hasMotif = motifPaths.length > 0;
@@ -1095,11 +1131,12 @@ async function buildPromptsForScene(
   const motifFormatSpec = motifAspectRatios.length
     ? ` Exact format for each motif (MUST be preserved 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.`
     : '';
-  const replaceCanvasHint = hasMotif && blueprintImagePath
-    ? ' If the composition reference (blueprint) already shows a canvas or picture on the wall, that canvas must be REPLACED by the user\'s uploaded motif(s) – not stretched, stuffed, or distorted; display the motif in its correct aspect ratio.'
+  const paintingTemplateWithMotifHint = hasMotif && blueprintImagePath
+    ? ' The first reference image (blueprint) is a PAINTING TEMPLATE (Malvorlage). You MUST keep the entire template visible: all logos, branding, numbers, outlines, and layout. Do NOT replace or remove the template. In the NUMBERED AREAS ONLY (the regions meant to be painted), combine with the user\'s uploaded motif(s): show the motif content there – either half-painted or fully painted – so the motif appears in those zones. The rest of the template (logos, numbers, borders, structure) must stay exactly as in the reference. The motif images are the last reference image(s); use them only inside the numbered areas of the template.'
     : '';
+  const motifPresentationHint = hasMotif ? getMotifPresentationHint(motifDisplayMode) : '';
   const motifPromptLine = hasMotif
-    ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${replaceCanvasHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
+    ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or in the numbered areas of a painting template). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${paintingTemplateWithMotifHint}${motifPresentationHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
     : '';
 
   const tagSection = tagPrompts.length > 0
@@ -1132,7 +1169,8 @@ async function buildPromptsForScene(
   }
 
   const enrichedPromptWithPatterns = patternMemory.injectSuccessfulPatterns(db, materialCategories, enrichedPrompt);
-  const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, undefined, motifAspectRatios);
+  const paintingTemplateWithMotif = hasMotif && !!blueprintImagePath;
+  const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, undefined, motifAspectRatios, paintingTemplateWithMotif, motifDisplayMode);
   return { enrichedPrompt: enrichedPromptWithPatterns, imagePrompt };
 }
 
@@ -1285,6 +1323,7 @@ async function generateImage(
     }
 
     let enrichedPromptWithPatterns: string;
+    const motifDisplay = options?.motifDisplayMode ?? 'auto';
 
     if (options?.existingEnrichedPrompt?.trim()) {
       // Format variant: reuse existing enriched prompt, skip Scene Intelligence. Same content/style, only aspect ratio changes.
@@ -1323,11 +1362,12 @@ async function generateImage(
     const motifFormatSpec = motifAspectRatios.length
       ? ` Exact format for each motif (MUST be preserved 100%): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = ${ar}`).join(', ')}.`
       : '';
-    const replaceCanvasHint = hasMotif && blueprintImagePath
-      ? ' If the composition reference (blueprint) already shows a canvas or picture on the wall, that canvas must be REPLACED by the user\'s uploaded motif(s) – not stretched, stuffed, or distorted; display the motif in its correct aspect ratio.'
+    const paintingTemplateWithMotifHint = hasMotif && blueprintImagePath
+      ? ' The first reference image (blueprint) is a PAINTING TEMPLATE (Malvorlage). You MUST keep the entire template visible: all logos, branding, numbers, outlines, and layout. Do NOT replace or remove the template. In the NUMBERED AREAS ONLY (the regions meant to be painted), combine with the user\'s uploaded motif(s): show the motif content there – either half-painted or fully painted – so the motif appears in those zones. The rest of the template (logos, numbers, borders, structure) must stay exactly as in the reference. The motif images are the last reference image(s); use them only inside the numbered areas of the template.'
       : '';
+    const motifPresentationHint = hasMotif ? getMotifPresentationHint(motifDisplay) : '';
     const motifPromptLine = hasMotif
-      ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or as templates). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${replaceCanvasHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
+      ? `## Canvas Motifs (ONLY these – no other images): ${motifPaths.length} motif image(s) were uploaded by the user. ONLY these exact motif images may appear in the scene (e.g. on canvases or in the numbered areas of a painting template). Do not use any other graphics, illustrations, or motifs. The format (aspect ratio, proportions) of each motif must NEVER be changed – no stretching, cropping, or distortion.${motifFormatSpec}${paintingTemplateWithMotifHint}${motifPresentationHint} The motif images are included as the LAST ${motifPaths.length} reference image(s).`
       : '';
 
     const tagSection = tagPrompts.length > 0
@@ -1384,7 +1424,8 @@ async function generateImage(
 
     const tagPromptsMap = getTagPromptsMap(db);
     const flux2ProRefIndices = fluxVersion === '2pro' ? { blueprintCount: blueprintImagePath ? 1 : 0, extraRefCount: Math.min(4, extraRefImagePaths.length), motifCount: motifPaths.length } : undefined;
-    const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, flux2ProRefIndices, motifAspectRatios);
+    const paintingTemplateWithMotif = hasMotif && !!blueprintImagePath;
+    const imagePrompt = buildImageGenerationPrompt(enrichedPromptWithPatterns, activeMaterials, hasMotif, aspectRatio, promptTags, tagPromptsMap, flux2ProRefIndices, motifAspectRatios, paintingTemplateWithMotif, motifDisplay);
 
     logger.info('scenes', `Generating image for scene ${sceneId} with ${referenceImages.length} reference images, aspect=${aspectRatio}`);
     const lora = getLoraConfig(db);

@@ -16,6 +16,9 @@ export function ApiKeyModal({ open, onClose }: Props) {
   const [openaiApiKey, setOpenaiApiKey] = useState('');
   const [hasOpenAIKey, setHasOpenAIKey] = useState(false);
   const [openaiSource, setOpenaiSource] = useState('');
+  const [xaiApiKey, setXaiApiKey] = useState('');
+  const [hasXaiKey, setHasXaiKey] = useState(false);
+  const [xaiSource, setXaiSource] = useState('');
   const [imageProvider, setImageProvider] = useState('gemini');
   const [replicateFluxVersion, setReplicateFluxVersion] = useState<'1' | '2pro' | 'grok'>('1');
   const [availableImageProviders, setAvailableImageProviders] = useState<string[]>(['gemini', 'replicate']);
@@ -37,6 +40,10 @@ export function ApiKeyModal({ open, onClose }: Props) {
       api.settings.getOpenAIKeyStatus().then(s => {
         setHasOpenAIKey(s.hasApiKey);
         setOpenaiSource(s.source);
+      });
+      api.settings.getXaiKeyStatus().then(s => {
+        setHasXaiKey(s.hasApiKey);
+        setXaiSource(s.source);
       });
       api.settings.getProviders().then(p => {
         setImageProvider(p.imageProvider);
@@ -71,6 +78,12 @@ export function ApiKeyModal({ open, onClose }: Props) {
         setHasOpenAIKey(true);
         setOpenaiSource('database');
         setOpenaiApiKey('');
+      }
+      if (xaiApiKey.trim()) {
+        await api.settings.setXaiKey(xaiApiKey.trim());
+        setHasXaiKey(true);
+        setXaiSource('database');
+        setXaiApiKey('');
       }
       await api.settings.setImageProvider(imageProvider, imageProvider === 'replicate' ? replicateFluxVersion : undefined);
       if (imageProvider === 'replicate') {
@@ -152,6 +165,25 @@ export function ApiKeyModal({ open, onClose }: Props) {
             Prompt-Keys testen (Gemini / ChatGPT)
           </button>
           <p className="text-xs text-gray-500 mt-1">Prueft, ob die Keys fuer die Prompt-Generierung erreichbar sind.</p>
+        </div>
+
+        {/* xAI API Key (optional – Grok-Video laeuft ueber Replicate) */}
+        <div className="mb-4">
+          <div className="flex items-center gap-2 mb-2">
+            <div className={`w-2 h-2 rounded-full ${hasXaiKey ? 'bg-green-400' : 'bg-gray-500'}`} />
+            <span className="text-sm text-gray-300">
+              {hasXaiKey ? `xAI API Key gesetzt (${xaiSource})` : 'Kein xAI API Key'}
+            </span>
+          </div>
+          <label className="block text-xs font-medium text-gray-400 uppercase tracking-wide mb-1">xAI API Key (optional)</label>
+          <input
+            type="password"
+            value={xaiApiKey}
+            onChange={e => setXaiApiKey(e.target.value)}
+            placeholder="xai-..."
+            className="w-full bg-gray-800/50 border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500"
+          />
+          <p className="text-xs text-gray-500 mt-1">Grok-Video laeuft ueber Replicate (Replicate-Key); kein separater xAI-Key noetig.</p>
         </div>
 
         {/* Replicate API Key */}

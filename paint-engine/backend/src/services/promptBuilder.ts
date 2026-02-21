@@ -309,7 +309,11 @@ export function buildImageGenerationPrompt(
   promptTags: string[] = [],
   tagPromptsMap?: Record<string, string>,
   flux2ProRefIndices?: Flux2ProRefIndices,
-  motifAspectRatios?: string[]
+  motifAspectRatios?: string[],
+  /** When true, blueprint is a painting template (Malvorlage): keep logos/numbers, show motif only in numbered areas. */
+  paintingTemplateWithMotif?: boolean,
+  /** How to present motif images: auto = infer from image (white edge+logos = template, else stretched); template = unrolled; stretched = on Keilrahmen. */
+  motifDisplayMode?: 'auto' | 'template' | 'stretched'
 ): string {
   const refInstructions = buildReferenceImageInstructions(materials, hasMotifImage);
   const tagMap = tagPromptsMap ?? TAG_PROMPTS;
@@ -320,8 +324,10 @@ export function buildImageGenerationPrompt(
     let idx = 1;
     const parts: string[] = [];
     if (blueprintCount > 0) {
-      const replaceHint = motifCount > 0 ? ' If it shows a canvas, REPLACE that canvas with the user\'s motif image(s); keep motif aspect ratio.' : '';
-      parts.push(`Image ${idx} = composition blueprint${replaceHint}`);
+      const blueprintHint = motifCount > 0
+        ? ' It is a PAINTING TEMPLATE (Malvorlage). Keep the full template visible: logos, branding, numbers, outlines. In the NUMBERED AREAS ONLY, show the user\'s motif(s) (half-painted or fully painted). Do not replace or remove the template.'
+        : '';
+      parts.push(`Image ${idx} = composition blueprint${motifCount > 0 ? ' (painting template)' : ''}${blueprintHint}`);
       idx += blueprintCount;
     }
     if (extraRefCount > 0) {
@@ -339,18 +345,23 @@ export function buildImageGenerationPrompt(
     indexSection = `\n\nREFERENCE IMAGE INDEX (use exactly as provided): ${parts.join('. ')}. Reproduce the content of each reference image faithfully. Do not add, remove, or alter elements that are not in the reference images. Do not duplicate or change the aspect ratio of motif images.\n`;
   }
 
+  const isPaintingTemplateWithMotif = paintingTemplateWithMotif ?? !!(flux2ProRefIndices && flux2ProRefIndices.blueprintCount > 0 && flux2ProRefIndices.motifCount > 0);
   let motifSection = '';
   if (hasMotifImage) {
     const formatBlock = motifAspectRatios?.length
       ? `\n- MOTIF FORMATS (MANDATORY – 100% preserve): ${motifAspectRatios.map((ar, i) => `Motif ${i + 1} = aspect ratio ${ar}`).join('; ')}. Each motif must be displayed in exactly this aspect ratio – no stretching, cropping, or distortion.`
       : '';
+    const canvasInstruction = isPaintingTemplateWithMotif
+      ? `- PAINTING TEMPLATE (first reference image): The blueprint is a painting template (Malvorlage) with numbered areas and possibly logos/branding. Do NOT replace the whole template. Keep the entire template visible: all logos, numbers, outlines, and layout. Show the user's uploaded motif(s) ONLY inside the NUMBERED AREAS – either half-painted or fully painted – so the motif content appears in those regions. The template structure and logos must remain; only the numbered zones show the motif.`
+      : `- REPLACE ANY EXISTING CANVAS IN THE REFERENCE: If the composition blueprint or any reference image already shows a canvas (or picture/frame on the wall), that canvas content must be REPLACED by the user's uploaded motif image(s). Do NOT keep the original artwork that appears on the canvas in the reference – the user's motif REPLACES it. The motif is displayed as a canvas, in its correct size and aspect ratio – never stretched, stuffed, cropped, or distorted.`;
     motifSection = `\n\nCANVAS MOTIF IMAGES (STRICT – NO HALLUCINATION):
-The LAST reference image(s) are the user's uploaded artwork. You MUST show these EXACT images on the canvas – not a variation, not an interpretation, not new artwork.
-- REPLACE ANY EXISTING CANVAS IN THE REFERENCE: If the composition blueprint or any reference image already shows a canvas (or picture/frame on the wall), that canvas content must be REPLACED by the user's uploaded motif image(s). Do NOT keep the original artwork that appears on the canvas in the reference – the user's motif REPLACES it. The motif is displayed as a canvas, in its correct size and aspect ratio – never stretched, stuffed, cropped, or distorted.
-- The artwork on the wall/canvas must be a faithful reproduction of those uploaded motif image(s): same subject, same colors, same composition, same details. Do NOT re-draw or re-invent.
-- ONLY these uploaded motif images may appear as canvas graphics. Do NOT add any other motifs, logos, or graphics. Do NOT generate new artwork; display the exact motif image content.
+The LAST reference image(s) are the user's uploaded artwork. You MUST show these EXACT images – not a variation, not an interpretation, not new artwork.
+${canvasInstruction}
+- The artwork (or motif in numbered areas) must be a faithful reproduction of those uploaded motif image(s): same subject, same colors, same composition, same details. Do NOT re-draw or re-invent.
+- ONLY these uploaded motif images may appear as canvas/motif graphics. Do NOT add any other motifs; preserve any logos and structure from the painting template when used. Do NOT generate new artwork; display the exact motif image content where required.
 - Preserve each motif's exact aspect ratio and proportions; do not stretch, crop, or distort. Each motif appears exactly once, identical in content to its reference image.${formatBlock}
-- Render each motif as the finished artwork on canvas (content = exact copy of the reference). Use paint-by-numbers texture only if the scene description explicitly requests it.
+- MOTIF PRESENTATION: ${motifDisplayMode === 'template' ? 'Display the motif(s) as an UNROLLED painting template (Malvorlage) on the table – white edge and logos visible, NOT stretched on a frame.' : motifDisplayMode === 'stretched' ? 'Display the motif(s) as a STRETCHED CANVAS on a Keilrahmen (on the wall or table as appropriate).' : 'Look at each motif reference: if it has a WHITE BORDER/EDGE with LOGOS, render as UNROLLED Malvorlage on the table (white edge and logos visible). If no white border, render as STRETCHED CANVAS on a Keilrahmen.'}
+- Render each motif as the finished artwork (content = exact copy of the reference). Use paint-by-numbers texture only if the scene description explicitly requests it.
 - CRITICAL: If you cannot reproduce the motif pixel-accurately, still do not substitute a different image – keep the same subject and composition as in the reference.`;
   }
 

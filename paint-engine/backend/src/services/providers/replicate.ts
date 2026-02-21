@@ -1,3 +1,4 @@
+import fs from 'fs';
 import Replicate from 'replicate';
 import sharp from 'sharp';
 import {
@@ -68,18 +69,23 @@ function toFlux2Dimension(n: number): number {
   return Math.round(clamped / FLUX2_ALIGN) * FLUX2_ALIGN;
 }
 
+/** Which Replicate model to use for image-to-video. 'grok' = xAI Grok Imagine Video (via Replicate, no xAI key). */
+export type ReplicateVideoModel = 'wan' | 'grok';
+
 export class ReplicateProvider implements AIProvider {
   name = 'replicate';
   private client: Replicate;
   private geminiProvider: GoogleProvider;
+  private videoModel: ReplicateVideoModel;
 
-  constructor(replicateApiKey?: string, geminiApiKey?: string) {
+  constructor(replicateApiKey?: string, geminiApiKey?: string, videoModel: ReplicateVideoModel = 'wan') {
     const token = replicateApiKey || process.env.REPLICATE_API_TOKEN || '';
     if (!token) {
       logger.warn('replicate', 'No Replicate API token; image generation will fail.');
     }
     this.client = new Replicate({ auth: token });
     this.geminiProvider = new GoogleProvider(geminiApiKey);
+    this.videoModel = videoModel;
   }
 
   async enrichPrompt(systemPrompt: string, userPrompt: string): Promise<string> {
@@ -456,17 +462,98 @@ export class ReplicateProvider implements AIProvider {
     return buf.toString('base64');
   }
 
-  async generateVideoFromImage(_req: VideoGenerationRequest): Promise<string> {
-    throw new AIProviderError('replicate', 'video', {
-      message: 'Video wird ueber Replicate nicht unterstuetzt. Bitte Veo oder Kling verwenden.',
-      status: 501,
+  async generateVideoFromImage(req: VideoGenerationRequest): Promise<string> {
+    try {
+      const imageDataUri = `data:${req.sourceImage.mimeType};base64,${req.sourceImage.base64}`;
+      const useGrok = this.videoModel === 'grok';
+      const model = useGrok ? 'xai/grok-imagine-video' : 'wan-video/wan-2.5-i2v-fast';
+      const input: Record<string, unknown> = useGrok
+        ? { image: imageDataUri, prompt: req.prompt }
+        : { image: imageDataUri, prompt: req.prompt };
+      logger.info('replicate', `Starting Replicate video generation (${useGrok ? 'Grok Imagine Video' : 'Wan 2.5 I2V Fast'})`);
+      const prediction = await this.client.predictions.create({
+        model,
+        input,
+        wait: false,
+      });
+      const id = (prediction as { id?: string }).id;
+      if (!id) {
+        throw new Error('Replicate did not return prediction id');
+      }
+      logger.info('replicate', `Video prediction started: ${id}`);
+      return id;
+    } catch (error: unknown) {
+      logger.error('replicate', 'Video generation failed', { error: (error as Error)?.message });
+      throw new AIProviderError('replicate', 'generateVideoFromImage', error);
+    }
+  }
+
+  async getVideoStatus(jobId: string): Promise<{ done: boolean; videoPath?: string; error?: string }> {
+    try {
+      const prediction = await this.client.predictions.get(jobId) as { status: string; output?: string | string[]; error?: string };
+      if (prediction.status === 'succeeded') {
+        const url = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
+        return { done: true, videoPath: typeof url === 'string' ? url : undefined };
+      }
+      if (prediction.status === 'failed' || prediction.status === 'canceled') {
+        return { done: true, error: prediction.error || prediction.status };
+      }
+      return { done: false };
+    } catch (error: unknown) {
+      logger.warn('replicate', `Video status check failed for ${jobId}`, { error: (error as Error)?.message });
+      return { done: false, error: (error as Error)?.message };
+    }
+  }
+
+  async pollVideoUntilDone(
+    operationInput: { name: string },
+    timeoutMs = 300000
+  ): Promise<{ video?: { url: string }; output?: string | string[] }> {
+    const predictionId = operationInput.name;
+    const startTime = Date.now();
+    let pollCount = 0;
+    while (Date.now() - startTime < timeoutMs) {
+      pollCount++;
+      const status = await this.getVideoStatus(predictionId);
+      if (status.done) {
+        if (status.error) {
+          throw new AIProviderError('replicate', 'video-polling', {
+            message: status.error,
+            status: 408,
+          });
+        }
+        const prediction = await this.client.predictions.get(predictionId) as { output?: string | string[] };
+        const url = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output;
+        logger.info('replicate', `Video ready after ${pollCount} polls`);
+        return { video: url ? { url: typeof url === 'string' ? url : String(url) } : undefined, output: prediction.output };
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    throw new AIProviderError('replicate', 'video-polling', {
+      message: `Video generation timed out after ${timeoutMs / 1000}s`,
+      status: 408,
     });
   }
 
-  async getVideoStatus(_jobId: string): Promise<{ done: boolean; videoPath?: string; error?: string }> {
-    throw new AIProviderError('replicate', 'video', {
-      message: 'Video wird ueber Replicate nicht unterstuetzt.',
-      status: 501,
-    });
+  async downloadVideo(operation: { video?: { url: string }; output?: string | string[] }, downloadPath: string): Promise<void> {
+    const url = operation.video?.url ?? (Array.isArray(operation.output) ? operation.output[0] : operation.output);
+    if (!url || typeof url !== 'string') {
+      throw new AIProviderError('replicate', 'downloadVideo', {
+        message: 'No video URL in operation response',
+        status: 422,
+      });
+    }
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Download ${res.status} ${res.statusText}`);
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      fs.writeFileSync(downloadPath, buf);
+      logger.info('replicate', `Video downloaded to ${downloadPath}`);
+    } catch (error: unknown) {
+      logger.error('replicate', 'Video download failed', { error: (error as Error)?.message });
+      throw new AIProviderError('replicate', 'downloadVideo', error);
+    }
   }
 }
